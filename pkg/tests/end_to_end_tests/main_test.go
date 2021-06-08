@@ -35,6 +35,7 @@ var (
 	useExtension      = flag.Bool("use-extension", true, "use the promscale extension")
 	useTimescaleDB    = flag.Bool("use-timescaledb", true, "use TimescaleDB")
 	useTimescale2     = flag.Bool("use-timescale2", true, "use TimescaleDB 2.0")
+	useTimescaleOSS   = flag.Bool("use-timescaledb-oss", false, "use TimescaleDB-OSS latest")
 	postgresVersion   = flag.Int("postgres-version-major", 13, "Major version of Postgres")
 	useMultinode      = flag.Bool("use-multinode", false, "use TimescaleDB 2.0 Multinode")
 	printLogs         = flag.Bool("print-logs", false, "print TimescaleDB logs")
@@ -73,6 +74,13 @@ func setExtensionState() {
 
 	if *useMultinode {
 		extensionState.UseMultinode()
+		*useTimescaleDB = true
+		*useTimescale2 = true
+	}
+
+	if *useTimescaleOSS {
+		fmt.Println("here")
+		extensionState.UseTimescaleDBOSS()
 		*useTimescaleDB = true
 		*useTimescale2 = true
 	}
