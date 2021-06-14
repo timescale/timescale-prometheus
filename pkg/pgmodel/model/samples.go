@@ -6,6 +6,7 @@ package model
 
 import (
 	"math"
+	"sync"
 	"time"
 
 	"github.com/prometheus/common/model"
@@ -15,7 +16,8 @@ import (
 type Samples interface {
 	GetSeries() *Series
 	CountSamples() int
-	getSample(int) *prompb.Sample
+	At(index int) prompb.Sample
+	PromSample() *promSample
 }
 
 // Data wraps incoming data with its in-timestamp. It is used to warn if the rate
@@ -25,13 +27,26 @@ type Data struct {
 	ReceivedTime time.Time
 }
 
+var samplesPool = sync.Pool{New: func() interface{} { return new(promSample) }}
+
+// PutSamples adds samples to the pool.
+func putSamples(s *promSample) {
+	s.series = nil
+	s.samples = s.samples[:0]
+	samplesPool.Put(s)
+}
+
+// todo: rename promSample to sample.
 type promSample struct {
 	series  *Series
 	samples []prompb.Sample
 }
 
 func NewPromSample(series *Series, samples []prompb.Sample) *promSample {
-	return &promSample{series, samples}
+	s := samplesPool.Get().(*promSample)
+	s.series = series
+	s.samples = samples
+	return s
 }
 
 func (t *promSample) GetSeries() *Series {
@@ -42,8 +57,12 @@ func (t *promSample) CountSamples() int {
 	return len(t.samples)
 }
 
-func (t *promSample) getSample(index int) *prompb.Sample {
-	return &t.samples[index]
+func (t *promSample) At(index int) prompb.Sample {
+	return t.samples[index]
+}
+
+func (t *promSample) PromSample() *promSample {
+	return t
 }
 
 // SamplesBatch is an iterator over a collection of sampleInfos that returns
@@ -118,12 +137,12 @@ func (t *SamplesBatch) Next() bool {
 
 // Values returns the values for the current row
 func (t *SamplesBatch) Values() (time.Time, float64, SeriesID, SeriesEpoch) {
-	info := t.seriesSamples[t.seriesIndex]
-	sample := info.getSample(t.sampleIndex)
+	sampleSet := t.seriesSamples[t.seriesIndex]
+	sample := sampleSet.At(t.sampleIndex)
 	if t.MinSeen > sample.Timestamp {
 		t.MinSeen = sample.Timestamp
 	}
-	sid, eid, err := info.GetSeries().GetSeriesID()
+	sid, eid, err := sampleSet.GetSeries().GetSeriesID()
 	if t.err == nil {
 		t.err = err
 	}
@@ -138,4 +157,11 @@ func (t *SamplesBatch) Absorb(other SamplesBatch) {
 // this is not nil *Conn.CopyFrom will abort the copy.
 func (t *SamplesBatch) Err() error {
 	return t.err
+}
+
+// Release puts the underlying promSamples back into its pool so that they can be reused.
+func (t *SamplesBatch) Release() {
+	for samplesIndex := range t.seriesSamples {
+		putSamples(t.seriesSamples[samplesIndex].PromSample())
+	}
 }
