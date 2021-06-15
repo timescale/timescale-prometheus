@@ -16,17 +16,29 @@ import (
 	"github.com/timescale/promscale/pkg/pgmodel/model"
 	"github.com/timescale/promscale/pkg/pgmodel/model/pgutf8str"
 	"github.com/timescale/promscale/pkg/pgxconn"
+	"github.com/timescale/promscale/pkg/prompb"
 )
 
-const seriesInsertSQL = "SELECT (_prom_catalog.get_or_create_series_id_for_label_array($1, l.elem)).series_id, l.nr FROM unnest($2::prom_api.label_array[]) WITH ORDINALITY l(elem, nr) ORDER BY l.elem"
+const (
+	seriesInsertSQL           = "SELECT (_prom_catalog.get_or_create_series_id_for_label_array($1, l.elem)).series_id, l.nr FROM unnest($2::prom_api.label_array[]) WITH ORDINALITY l(elem, nr) ORDER BY l.elem"
+	createExemplarTable       = "SELECT * FROM " + schema.Catalog + ".create_exemplar_table_if_not_exists($1)"
+	getExemplarLabelPositions = "SELECT * FROM " + schema.Catalog + ".get_exemplar_label_key_positions($1, $2)"
+)
 
 type metricBatcher struct {
 	conn            pgxconn.PgxConn
 	input           chan *insertDataRequest
 	pending         *pendingBuffer
+	metricName      string
 	metricTableName string
 	toCopiers       chan copyRequest
 	labelArrayOID   uint32
+	exemplarCatalog *exemplarInfo
+}
+
+type exemplarInfo struct {
+	seenPreviuosly bool
+	exemplarCache  *cache.ExemplarLabelsPosCache
 }
 
 // Create the metric table for the metric we handle, if it does not already
@@ -88,6 +100,7 @@ func runMetricBatcher(conn pgxconn.PgxConn,
 		conn:            conn,
 		input:           input,
 		pending:         NewPendingBuffer(),
+		metricName:      metricName,
 		metricTableName: tableName,
 		toCopiers:       toCopiers,
 		labelArrayOID:   labelArrayOID,
@@ -162,17 +175,123 @@ func (h *metricBatcher) flush() {
 
 // Set all unset SeriesIds and flush to the next layer
 func (h *metricBatcher) flushPending() {
-	err := h.setSeriesIds(h.pending.batch.GetSeriesSamples())
-	if err != nil {
+	processErr := func(err error) {
 		h.pending.reportResults(err)
 		h.pending.release()
 		h.pending = NewPendingBuffer()
+	}
+	containsExemplars, err := h.setSeriesIds(h.pending.batch.Data())
+	if err != nil {
+		processErr(err)
 		return
+	}
+	if containsExemplars {
+		err = h.processExemplars()
+		if err != nil {
+			processErr(err)
+			return
+		}
 	}
 
 	MetricBatcherFlushSeries.Observe(float64(h.pending.batch.CountSeries()))
 	h.toCopiers <- copyRequest{h.pending, h.metricTableName}
 	h.pending = NewPendingBuffer()
+}
+
+func (h *metricBatcher) processExemplars() error {
+	if !h.exemplarCatalog.seenPreviuosly {
+		// We are seeing the exemplar belonging to this metric first time. It may be the
+		// first time of this exemplar in the database. So, let's attempt to create a table
+		// if it does not exists.
+		var created bool
+		err := h.conn.QueryRow(context.Background(), createExemplarTable, h.metricName).Scan(&created)
+		if err != nil {
+			return fmt.Errorf("checking exemplar table creation: %w", err)
+		}
+	}
+
+}
+
+func (h *metricBatcher) orderExemplarLabelValues(data []model.Insertable) error {
+	var (
+		exemplarIndex int
+		batch pgxconn.PgxBatch
+		pendingIndexes []int
+	)
+	
+	for i := range data {
+		row := data[i]
+		if row.Type() == model.Exemplar {
+			exemplarLbls := row.ExemplarLabels(exemplarIndex)
+			exemplarIndex++
+			keys, values := extractKeyValue(exemplarLbls)
+			pos, exists := h.exemplarCatalog.exemplarCache.GetLabelPositions(row.GetSeries().MetricName())
+			if !exists {
+				if batch == nil {
+					batch = h.conn.NewBatch()
+				}
+				batch.Queue(getExemplarLabelPositions, h.metricName, keys)
+				pendingIndexes = append(pendingIndexes, i)
+				continue
+			}
+			orderLabelValues(pos, keys, values)
+		}
+	}
+	if len(pendingIndexes) > 0 {
+		// There are positions that require to be fetched. Let's fetch them.
+		results, err := h.conn.SendBatch(context.Background(), batch)
+		if err != nil {
+			return fmt.Errorf("sending fetch label key positions batch: %w", err)
+		}
+		defer results.Close()
+		for i := range pendingIndexes {
+			var (
+				metricName string
+				labelKeyPos map[string]int
+			)
+			err := results.QueryRow().Scan(&metricName, &labelKeyPos)
+			if err != nil {
+				return fmt.Errorf("fetching label key positions: %w", err)
+			}
+			h.exemplarCatalog.exemplarCache.SetorUpdateLabelPositions(metricName, labelKeyPos)
+			exemplarLbls := data[pendingIndexes[i]].ExemplarLabels()
+			orderLabelValues(labelKeyPos, )
+		}
+	}
+}
+
+func orderLabelValues(positionIndex map[string]int, keys, values []string) (indexedLabelValues []string, err error) {
+	indexedLabelValues = make([]string, len(positionIndex))
+	fillEmptyValues(indexedLabelValues)
+	for i := range keys {
+		k, v := keys[i], values[i]
+		position, ok := positionIndex[k]
+		if !ok {
+			return indexedLabelValues, fmt.Errorf("position not found in index")
+		}
+		indexedLabelValues[position] = v
+	}
+	return indexedLabelValues, nil
+}
+
+const emptyExemplarValues = "__promscale_no_value__"
+
+func fillEmptyValues(s []string) []string {
+	for i := range s {
+		s[i] = emptyExemplarValues
+	}
+	return s
+}
+
+func extractKeyValue(l []prompb.Label) (keys, values []string) {
+	n := len(l)
+	keys = make([]string, n)
+	values = make([]string, n)
+	for i := range l {
+		keys[i] = l[i].Name
+		values[i] = l[i].Value
+	}
+	return
 }
 
 type labelInfo struct {
@@ -186,15 +305,19 @@ func labelArrayTranscoder() pgtype.ValueTranscoder { return &pgtype.Int4Array{} 
 // and repopulating the cache accordingly.
 // returns: the tableName for the metric being inserted into
 // TODO move up to the rest of insertHandler
-func (h *metricBatcher) setSeriesIds(seriesSamples []model.Samples) error {
-	seriesToInsert := make([]*model.Series, 0, len(seriesSamples))
-	for i, series := range seriesSamples {
+func (h *metricBatcher) setSeriesIds(rows []model.Insertable) (containsExemplars bool, err error) {
+	seriesToInsert := make([]*model.Series, 0, len(rows))
+	containsExemplars := false
+	for i, series := range rows {
 		if !series.GetSeries().IsSeriesIDSet() {
-			seriesToInsert = append(seriesToInsert, seriesSamples[i].GetSeries())
+			seriesToInsert = append(seriesToInsert, rows[i].GetSeries())
+		}
+		if series.Type() == model.Exemplar {
+			containsExemplars = true
 		}
 	}
 	if len(seriesToInsert) == 0 {
-		return nil
+		return
 	}
 
 	metricName := seriesToInsert[0].MetricName()
@@ -215,14 +338,14 @@ func (h *metricBatcher) setSeriesIds(seriesSamples []model.Samples) error {
 				if !ok {
 					labelMap[key] = labelInfo{}
 					if err := labelList.Add(names[i], values[i]); err != nil {
-						return fmt.Errorf("failed to add label to labelList: %w", err)
+						return containsExemplars, fmt.Errorf("failed to add label to labelList: %w", err)
 					}
 				}
 			}
 		}
 	}
 	if len(labelMap) == 0 {
-		return nil
+		return
 	}
 
 	//labels have to be created before series are since we need a canonical
@@ -232,26 +355,26 @@ func (h *metricBatcher) setSeriesIds(seriesSamples []model.Samples) error {
 	//not across series.
 	dbEpoch, maxPos, err := h.fillLabelIDs(metricName, labelList, labelMap)
 	if err != nil {
-		return fmt.Errorf("Error setting series ids: %w", err)
+		return containsExemplars, fmt.Errorf("Error setting series ids: %w", err)
 	}
 
 	//create the label arrays
 	labelArraySet, seriesToInsert, err := createLabelArrays(seriesToInsert, labelMap, maxPos)
 	if err != nil {
-		return fmt.Errorf("Error setting series ids: %w", err)
+		return containsExemplars, fmt.Errorf("Error setting series ids: %w", err)
 	}
 	if len(labelArraySet) == 0 {
-		return nil
+		return
 	}
 
 	labelArrayArray := pgtype.NewArrayType("prom_api.label_array[]", h.labelArrayOID, labelArrayTranscoder)
 	err = labelArrayArray.Set(labelArraySet)
 	if err != nil {
-		return fmt.Errorf("Error setting series id: cannot set label_array: %w", err)
+		return containsExemplars, fmt.Errorf("Error setting series id: cannot set label_array: %w", err)
 	}
 	res, err := h.conn.Query(context.Background(), seriesInsertSQL, metricName, labelArrayArray)
 	if err != nil {
-		return fmt.Errorf("Error setting series_id: cannot query for series_id: %w", err)
+		return containsExemplars, fmt.Errorf("Error setting series_id: cannot query for series_id: %w", err)
 	}
 	defer res.Close()
 
@@ -263,13 +386,13 @@ func (h *metricBatcher) setSeriesIds(seriesSamples []model.Samples) error {
 		)
 		err := res.Scan(&id, &ordinality)
 		if err != nil {
-			return fmt.Errorf("Error setting series_id: cannot scan series_id: %w", err)
+			return containsExemplars, fmt.Errorf("Error setting series_id: cannot scan series_id: %w", err)
 		}
 		seriesToInsert[int(ordinality)-1].SetSeriesID(id, dbEpoch)
 		count++
 	}
 	if err := res.Err(); err != nil {
-		return fmt.Errorf("Error setting series_id: reading series id rows: %w", err)
+		return containsExemplars, fmt.Errorf("Error setting series_id: reading series id rows: %w", err)
 	}
 	if count != len(seriesToInsert) {
 		//This should never happen according to the logic. This is purely defensive.
@@ -277,7 +400,7 @@ func (h *metricBatcher) setSeriesIds(seriesSamples []model.Samples) error {
 		//get data corruption if we continue.
 		panic(fmt.Sprintf("number series returned %d doesn't match expected series %d", count, len(seriesToInsert)))
 	}
-	return nil
+	return
 }
 
 func (h *metricBatcher) fillLabelIDs(metricName string, labelList *model.LabelList, labelMap map[labels.Label]labelInfo) (model.SeriesEpoch, int, error) {

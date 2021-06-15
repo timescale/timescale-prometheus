@@ -52,6 +52,14 @@ func NewPgxIngestorForTests(conn pgxconn.PgxConn, cfg *Cfg) (*DBIngestor, error)
 	return NewPgxIngestor(conn, c, s, cfg)
 }
 
+func (ingestor *DBIngestor) samples(l *model.Series, ts *prompb.TimeSeries) (model.Insertable, int, error) {
+	return model.NewInsertable(l, ts.Samples), len(ts.Samples), nil
+}
+
+func (ingestor *DBIngestor) exemplars(l *model.Series, ts *prompb.TimeSeries) (model.Insertable, int, error) {
+	return model.NewInsertable(l, ts.Exemplars), len(ts.Exemplars), nil
+}
+
 // Ingest transforms and ingests the timeseries data into Timescale database.
 // input:
 //     tts the []Timeseries to insert
@@ -62,29 +70,47 @@ func (ingestor *DBIngestor) Ingest(r *prompb.WriteRequest) (uint64, error) {
 		err       error
 		totalRows uint64
 
-		dataSamples = make(map[string][]model.Samples)
+		dataSamples = make(map[string][]model.Insertable)
 	)
 	for i := range r.Timeseries {
-		ts := &r.Timeseries[i]
-		if len(ts.Samples) == 0 {
-			continue
+		var (
+			ts         = &r.Timeseries[i]
+			series     *model.Series
+			metricName string
+			err        error
+		)
+		if len(ts.Labels) > 0 {
+			// Normalize and canonicalize t.Labels.
+			// After this point t.Labels should never be used again.
+			series, metricName, err = ingestor.sCache.GetSeriesFromProtos(ts.Labels)
+			if err != nil {
+				return 0, err
+			}
+			if metricName == "" {
+				return 0, errors.ErrNoMetricName
+			}
 		}
-		// Normalize and canonicalize t.Labels.
-		// After this point t.Labels should never be used again.
-		seriesLabels, metricName, err := ingestor.sCache.GetSeriesFromProtos(ts.Labels)
-		if err != nil {
-			return 0, err
-		}
-		if metricName == "" {
-			return 0, errors.ErrNoMetricName
-		}
-		sample := model.NewPromSample(seriesLabels, ts.Samples)
-		totalRows += uint64(len(ts.Samples))
 
-		dataSamples[metricName] = append(dataSamples[metricName], sample)
+		if len(ts.Samples) > 0 {
+			samples, count, err := ingestor.samples(series, ts)
+			if err != nil {
+				return 0, fmt.Errorf("samples: %w", err)
+			}
+			totalRows += uint64(count)
+			dataSamples[metricName] = append(dataSamples[metricName], samples)
+		}
+		if len(ts.Exemplars) > 0 {
+			exemplars, count, err := ingestor.exemplars(series, ts)
+			if err != nil {
+				return 0, fmt.Errorf("exemplars: %w", err)
+			}
+			totalRows += uint64(count)
+			dataSamples[metricName] = append(dataSamples[metricName], exemplars)
+		}
 		// we're going to free req after this, but we still need the samples,
 		// so nil the field
 		ts.Samples = nil
+		ts.Exemplars = nil
 	}
 	// WriteRequests can contain pointers into the original buffer we deserialized
 	// them out of, and can be quite large in and of themselves. In order to prevent

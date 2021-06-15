@@ -208,7 +208,7 @@ func (p *pgxDispatcher) InsertData(dataTS model.Data) (uint64, error) {
 	errChan := make(chan error, 1)
 	for metricName, data := range rows {
 		for _, si := range data {
-			numRows += uint64(si.CountSamples())
+			numRows += uint64(si.Count())
 		}
 		// the following is usually non-blocking, just a channel insert
 		p.getMetricBatcher(metricName) <- &insertDataRequest{metric: metricName, data: data, finished: workFinished, errChan: errChan}
@@ -271,7 +271,7 @@ func (p *pgxDispatcher) getMetricBatcher(metric string) chan *insertDataRequest 
 
 type insertDataRequest struct {
 	metric   string
-	data     []model.Samples
+	data     []model.Insertable
 	finished *sync.WaitGroup
 	errChan  chan error
 }
