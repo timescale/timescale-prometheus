@@ -186,7 +186,7 @@ func (h *metricBatcher) flushPending() {
 		return
 	}
 	if containsExemplars {
-		err = h.processExemplars()
+		err = h.processExemplars(h.pending.batch.Data())
 		if err != nil {
 			processErr(err)
 			return
@@ -198,7 +198,7 @@ func (h *metricBatcher) flushPending() {
 	h.pending = NewPendingBuffer()
 }
 
-func (h *metricBatcher) processExemplars() error {
+func (h *metricBatcher) processExemplars(data []model.Insertable) error {
 	if !h.exemplarCatalog.seenPreviuosly {
 		// We are seeing the exemplar belonging to this metric first time. It may be the
 		// first time of this exemplar in the database. So, let's attempt to create a table
@@ -209,36 +209,40 @@ func (h *metricBatcher) processExemplars() error {
 			return fmt.Errorf("checking exemplar table creation: %w", err)
 		}
 	}
-
+	err := h.orderExemplarLabelValues(data)
+	if err != nil {
+		return fmt.Errorf("metric-batcher: ordering exemplar label values: %w", err)
+	}
+	return nil
 }
 
+// todo: make this a function only!
 func (h *metricBatcher) orderExemplarLabelValues(data []model.Insertable) error {
 	var (
-		exemplarIndex int
-		batch pgxconn.PgxBatch
+		batch          = h.conn.NewBatch() // todo: make this a pool
 		pendingIndexes []int
 	)
-	
+
 	for i := range data {
 		row := data[i]
 		if row.Type() == model.Exemplar {
-			exemplarLbls := row.ExemplarLabels(exemplarIndex)
-			exemplarIndex++
-			keys, values := extractKeyValue(exemplarLbls)
-			pos, exists := h.exemplarCatalog.exemplarCache.GetLabelPositions(row.GetSeries().MetricName())
-			if !exists {
-				if batch == nil {
-					batch = h.conn.NewBatch()
+			labelKeyIndex, entryExists := h.exemplarCatalog.exemplarCache.GetLabelPositions(row.GetSeries().MetricName())
+			if entryExists {
+				// todo: optimize the blocks below to avoid redundation.
+				if positionNotExists := row.OrderExemplarLabels(labelKeyIndex); positionNotExists {
+					batch.Queue(getExemplarLabelPositions, h.metricName, row.AllExemplarLabelKeys())
+					pendingIndexes = append(pendingIndexes, i)
 				}
-				batch.Queue(getExemplarLabelPositions, h.metricName, keys)
-				pendingIndexes = append(pendingIndexes, i)
 				continue
 			}
-			orderLabelValues(pos, keys, values)
+			batch.Queue(getExemplarLabelPositions, h.metricName, row.AllExemplarLabelKeys())
+			pendingIndexes = append(pendingIndexes, i)
 		}
 	}
 	if len(pendingIndexes) > 0 {
-		// There are positions that require to be fetched. Let's fetch them.
+		// There are positions that require to be fetched. Let's fetch them and fill our indexes.
+		// pendingIndexes contain the exact array index for rows, where the cache miss were found. Let's
+		// use the pendingIndexes to go to those rows and order the labels in exemplars quickly.
 		results, err := h.conn.SendBatch(context.Background(), batch)
 		if err != nil {
 			return fmt.Errorf("sending fetch label key positions batch: %w", err)
@@ -246,41 +250,19 @@ func (h *metricBatcher) orderExemplarLabelValues(data []model.Insertable) error 
 		defer results.Close()
 		for i := range pendingIndexes {
 			var (
-				metricName string
-				labelKeyPos map[string]int
+				metricName    string
+				labelKeyIndex map[string]int
 			)
-			err := results.QueryRow().Scan(&metricName, &labelKeyPos)
+			err := results.QueryRow().Scan(&metricName, &labelKeyIndex)
 			if err != nil {
 				return fmt.Errorf("fetching label key positions: %w", err)
 			}
-			h.exemplarCatalog.exemplarCache.SetorUpdateLabelPositions(metricName, labelKeyPos)
-			exemplarLbls := data[pendingIndexes[i]].ExemplarLabels()
-			orderLabelValues(labelKeyPos, )
+			h.exemplarCatalog.exemplarCache.SetorUpdateLabelPositions(metricName, labelKeyIndex)
+			row := data[i]
+			_ = row.OrderExemplarLabels(labelKeyIndex) // We just filled the position, so no need to check if it exists or not.
 		}
 	}
-}
-
-func orderLabelValues(positionIndex map[string]int, keys, values []string) (indexedLabelValues []string, err error) {
-	indexedLabelValues = make([]string, len(positionIndex))
-	fillEmptyValues(indexedLabelValues)
-	for i := range keys {
-		k, v := keys[i], values[i]
-		position, ok := positionIndex[k]
-		if !ok {
-			return indexedLabelValues, fmt.Errorf("position not found in index")
-		}
-		indexedLabelValues[position] = v
-	}
-	return indexedLabelValues, nil
-}
-
-const emptyExemplarValues = "__promscale_no_value__"
-
-func fillEmptyValues(s []string) []string {
-	for i := range s {
-		s[i] = emptyExemplarValues
-	}
-	return s
+	return nil
 }
 
 func extractKeyValue(l []prompb.Label) (keys, values []string) {
@@ -307,7 +289,7 @@ func labelArrayTranscoder() pgtype.ValueTranscoder { return &pgtype.Int4Array{} 
 // TODO move up to the rest of insertHandler
 func (h *metricBatcher) setSeriesIds(rows []model.Insertable) (containsExemplars bool, err error) {
 	seriesToInsert := make([]*model.Series, 0, len(rows))
-	containsExemplars := false
+	containsExemplars = false
 	for i, series := range rows {
 		if !series.GetSeries().IsSeriesIDSet() {
 			seriesToInsert = append(seriesToInsert, rows[i].GetSeries())
