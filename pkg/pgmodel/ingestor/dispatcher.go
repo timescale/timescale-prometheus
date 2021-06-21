@@ -30,6 +30,7 @@ type pgxDispatcher struct {
 	conn                   pgxconn.PgxConn
 	metricTableNames       cache.MetricCache
 	scache                 cache.SeriesCache
+	exemplarKeyPosCache    *cache.ExemplarLabelsPosCache // todo: convert to interface.
 	inserters              sync.Map
 	completeMetricCreation chan struct{}
 	asyncAcks              bool
@@ -41,7 +42,7 @@ type pgxDispatcher struct {
 	labelArrayOID          uint32
 }
 
-func newPgxDispatcher(conn pgxconn.PgxConn, cache cache.MetricCache, scache cache.SeriesCache, cfg *Cfg) (*pgxDispatcher, error) {
+func newPgxDispatcher(conn pgxconn.PgxConn, cache cache.MetricCache, scache cache.SeriesCache, eCache *cache.ExemplarLabelsPosCache, cfg *Cfg) (*pgxDispatcher, error) {
 	cmc := make(chan struct{}, 1)
 
 	numCopiers := cfg.NumCopiers
@@ -71,6 +72,7 @@ func newPgxDispatcher(conn pgxconn.PgxConn, cache cache.MetricCache, scache cach
 		conn:                   conn,
 		metricTableNames:       cache,
 		scache:                 scache,
+		exemplarKeyPosCache:    eCache,
 		completeMetricCreation: cmc,
 		asyncAcks:              cfg.AsyncAcks,
 		toCopiers:              toCopiers,
@@ -95,6 +97,10 @@ func newPgxDispatcher(conn pgxconn.PgxConn, cache cache.MetricCache, scache cach
 	err := conn.QueryRow(context.Background(), `SELECT '`+schema.Prom+`.label_array'::regtype::oid`).Scan(&inserter.labelArrayOID)
 	if err != nil {
 		return nil, err
+	}
+	err = registerLabelValueArrayOID(conn)
+	if err != nil {
+		return nil, fmt.Errorf("registering prom_api.label_value_array[] oid: %w", err)
 	}
 
 	//on startup run a completeMetricCreation to recover any potentially
@@ -261,7 +267,7 @@ func (p *pgxDispatcher) getMetricBatcher(metric string) chan *insertDataRequest 
 		actual, old := p.inserters.LoadOrStore(metric, c)
 		inserter = actual
 		if !old {
-			go runMetricBatcher(p.conn, c, metric, p.completeMetricCreation, p.metricTableNames, p.toCopiers, p.labelArrayOID)
+			go runMetricBatcher(p.conn, c, metric, p.completeMetricCreation, p.metricTableNames, p.exemplarKeyPosCache, p.toCopiers, p.labelArrayOID)
 		}
 	}
 	ch := inserter.(chan *insertDataRequest)

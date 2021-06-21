@@ -22,7 +22,7 @@ import (
 const (
 	seriesInsertSQL           = "SELECT (_prom_catalog.get_or_create_series_id_for_label_array($1, l.elem)).series_id, l.nr FROM unnest($2::prom_api.label_array[]) WITH ORDINALITY l(elem, nr) ORDER BY l.elem"
 	createExemplarTable       = "SELECT * FROM " + schema.Catalog + ".create_exemplar_table_if_not_exists($1)"
-	getExemplarLabelPositions = "SELECT * FROM " + schema.Catalog + ".get_exemplar_label_key_positions($1, $2)"
+	getExemplarLabelPositions = "SELECT * FROM " + schema.Catalog + ".get_exemplar_label_key_positions($1::TEXT, $2::TEXT[])"
 )
 
 type metricBatcher struct {
@@ -74,6 +74,7 @@ func runMetricBatcher(conn pgxconn.PgxConn,
 	metricName string,
 	completeMetricCreationSignal chan struct{},
 	metricTableNames cache.MetricCache,
+	exemplarKeyPos *cache.ExemplarLabelsPosCache, // todo: convert to interface.
 	toCopiers chan copyRequest,
 	labelArrayOID uint32) {
 
@@ -104,6 +105,9 @@ func runMetricBatcher(conn pgxconn.PgxConn,
 		metricTableName: tableName,
 		toCopiers:       toCopiers,
 		labelArrayOID:   labelArrayOID,
+		exemplarCatalog: &exemplarInfo{
+			exemplarCache: exemplarKeyPos,
+		},
 	}
 
 	handler.handleReq(firstReq)
@@ -251,7 +255,7 @@ func (h *metricBatcher) orderExemplarLabelValues(data []model.Insertable) error 
 		for i := range pendingIndexes {
 			var (
 				metricName    string
-				labelKeyIndex map[string]int
+				labelKeyIndex = make(map[string]int)
 			)
 			err := results.QueryRow().Scan(&metricName, &labelKeyIndex)
 			if err != nil {
