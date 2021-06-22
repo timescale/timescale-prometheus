@@ -247,8 +247,8 @@ var MigrationFiles = func() http.FileSystem {
 			name:    "0.4.2-dev",
 			modTime: time.Time{},
 		},
-		"/versions/dev/0.4.2-dev/1-exemplar_objects..sql": &vfsgen۰CompressedFileInfo{
-			name:             "1-exemplar_objects..sql",
+		"/versions/dev/0.4.2-dev/1-exemplar_objects.sql": &vfsgen۰CompressedFileInfo{
+			name:             "1-exemplar_objects.sql",
 			modTime:          time.Time{},
 			uncompressedSize: 933,
 
@@ -321,7 +321,7 @@ var MigrationFiles = func() http.FileSystem {
 		fs["/versions/dev/0.3.1-dev/2-fix_more_permissions.sql"].(os.FileInfo),
 	}
 	fs["/versions/dev/0.4.2-dev"].(*vfsgen۰DirInfo).entries = []os.FileInfo{
-		fs["/versions/dev/0.4.2-dev/1-exemplar_objects..sql"].(os.FileInfo),
+		fs["/versions/dev/0.4.2-dev/1-exemplar_objects.sql"].(os.FileInfo),
 	}
 
 	return fs

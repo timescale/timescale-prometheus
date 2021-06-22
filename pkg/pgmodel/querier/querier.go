@@ -35,8 +35,8 @@ type Reader interface {
 type Querier interface {
 	// Query returns resulting timeseries for a query.
 	Query(*prompb.Query) ([]*prompb.TimeSeries, error)
-	// Select returns a series set that matches the supplied query parameters.
-	Select(mint int64, maxt int64, sortSeries bool, hints *storage.SelectHints, path []parser.Node, ms ...*labels.Matcher) (storage.SeriesSet, parser.Node)
+	// SelectSamples returns a series set containing the samples that matches the supplied query parameters.
+	SelectSamples(mint int64, maxt int64, sortSeries bool, hints *storage.SelectHints, path []parser.Node, ms ...*labels.Matcher) (storage.SeriesSet, parser.Node)
 }
 
 const (
@@ -69,9 +69,9 @@ type pgxQuerier struct {
 
 var _ Querier = (*pgxQuerier)(nil)
 
-// Select implements the Querier interface. It is the entry point for our
+// SelectSamples implements the Querier interface. It is the entry point for our
 // own version of the Prometheus engine.
-func (q *pgxQuerier) Select(mint int64, maxt int64, sortSeries bool, hints *storage.SelectHints, path []parser.Node, ms ...*labels.Matcher) (storage.SeriesSet, parser.Node) {
+func (q *pgxQuerier) SelectSamples(mint, maxt int64, sortSeries bool, hints *storage.SelectHints, path []parser.Node, ms ...*labels.Matcher) (storage.SeriesSet, parser.Node) {
 	rows, topNode, err := q.getResultRows(mint, maxt, hints, path, ms)
 	if err != nil {
 		return errorSeriesSet{err: err}, nil
@@ -80,6 +80,14 @@ func (q *pgxQuerier) Select(mint int64, maxt int64, sortSeries bool, hints *stor
 	ss := buildSeriesSet(rows, q.labelsReader)
 	return ss, topNode
 }
+
+//func (q *pgxQuerier) SelectExemplars(mint, max int64, ms ...*labels.Matcher) error {
+//	metrics, seriesIDs, err := GetMetricNameSeriesIDFromMatchers(q.conn, ms)
+//	if err != nil {
+//		return fmt.Errorf("get metrics-seriesIDs from matchers: %w", err)
+//	}
+//
+//}
 
 // Query implements the Querier interface. It is the entry point for
 // remote-storage queries.

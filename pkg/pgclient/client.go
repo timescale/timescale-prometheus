@@ -142,12 +142,13 @@ func NewClientWithPool(cfg *Config, numCopiers int, dbConn pgxconn.PgxConn, mt t
 	var dbIngestor *ingestor.DBIngestor
 	if !readOnly {
 		var (
-			err                 error
+			err error
+
 			exemplarKeyPosCache = cache.NewExemplarLabelsPosCache(cfg.CacheConfig)
 		)
 		dbIngestor, err = ingestor.NewPgxIngestor(dbConn, metricsCache, seriesCache, exemplarKeyPosCache, &c)
 		if err != nil {
-			log.Error("msg", "err starting ingestor", "err", err)
+			log.Error("msg", "err starting the ingestor", "err", err)
 			return nil, err
 		}
 	}

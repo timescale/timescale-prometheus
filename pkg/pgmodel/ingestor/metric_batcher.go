@@ -8,7 +8,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/jackc/pgtype"
 	"github.com/prometheus/prometheus/pkg/labels"
 	"github.com/timescale/promscale/pkg/pgmodel/cache"
 	"github.com/timescale/promscale/pkg/pgmodel/common/errors"
@@ -16,7 +15,6 @@ import (
 	"github.com/timescale/promscale/pkg/pgmodel/model"
 	"github.com/timescale/promscale/pkg/pgmodel/model/pgutf8str"
 	"github.com/timescale/promscale/pkg/pgxconn"
-	"github.com/timescale/promscale/pkg/prompb"
 )
 
 const (
@@ -38,7 +36,7 @@ type metricBatcher struct {
 
 type exemplarInfo struct {
 	seenPreviuosly bool
-	exemplarCache  *cache.ExemplarLabelsPosCache
+	exemplarCache  cache.PositionCache
 }
 
 // Create the metric table for the metric we handle, if it does not already
@@ -74,7 +72,7 @@ func runMetricBatcher(conn pgxconn.PgxConn,
 	metricName string,
 	completeMetricCreationSignal chan struct{},
 	metricTableNames cache.MetricCache,
-	exemplarKeyPos *cache.ExemplarLabelsPosCache, // todo: convert to interface.
+	exemplarKeyPos cache.PositionCache,
 	toCopiers chan copyRequest,
 	labelArrayOID uint32) {
 
@@ -231,16 +229,16 @@ func (h *metricBatcher) orderExemplarLabelValues(data []model.Insertable) error 
 		row := data[i]
 		if row.Type() == model.Exemplar {
 			labelKeyIndex, entryExists := h.exemplarCatalog.exemplarCache.GetLabelPositions(row.GetSeries().MetricName())
+			needsFetch := true
 			if entryExists {
-				// todo: optimize the blocks below to avoid redundation.
-				if positionNotExists := row.OrderExemplarLabels(labelKeyIndex); positionNotExists {
-					batch.Queue(getExemplarLabelPositions, h.metricName, row.AllExemplarLabelKeys())
-					pendingIndexes = append(pendingIndexes, i)
+				if positionExists := row.OrderExemplarLabels(labelKeyIndex); positionExists {
+					needsFetch = false
 				}
-				continue
 			}
-			batch.Queue(getExemplarLabelPositions, h.metricName, row.AllExemplarLabelKeys())
-			pendingIndexes = append(pendingIndexes, i)
+			if needsFetch {
+				batch.Queue(getExemplarLabelPositions, row.GetSeries().MetricName(), row.AllExemplarLabelKeys())
+				pendingIndexes = append(pendingIndexes, i)
+			}
 		}
 	}
 	if len(pendingIndexes) > 0 {
@@ -252,40 +250,28 @@ func (h *metricBatcher) orderExemplarLabelValues(data []model.Insertable) error 
 			return fmt.Errorf("sending fetch label key positions batch: %w", err)
 		}
 		defer results.Close()
-		for i := range pendingIndexes {
+		for _, index := range pendingIndexes {
 			var (
 				metricName    string
-				labelKeyIndex = make(map[string]int)
+				labelKeyIndex map[string]int
 			)
 			err := results.QueryRow().Scan(&metricName, &labelKeyIndex)
 			if err != nil {
 				return fmt.Errorf("fetching label key positions: %w", err)
 			}
 			h.exemplarCatalog.exemplarCache.SetorUpdateLabelPositions(metricName, labelKeyIndex)
-			row := data[i]
-			_ = row.OrderExemplarLabels(labelKeyIndex) // We just filled the position, so no need to check if it exists or not.
+			row := data[index]
+			row.OrderExemplarLabels(labelKeyIndex) // We just filled the position, so no need to check if it exists or not.
 		}
 	}
 	return nil
 }
 
-func extractKeyValue(l []prompb.Label) (keys, values []string) {
-	n := len(l)
-	keys = make([]string, n)
-	values = make([]string, n)
-	for i := range l {
-		keys[i] = l[i].Name
-		values[i] = l[i].Value
-	}
-	return
-}
 
 type labelInfo struct {
 	labelID int32
 	Pos     int32
 }
-
-func labelArrayTranscoder() pgtype.ValueTranscoder { return &pgtype.Int4Array{} }
 
 // Set all seriesIds for a samplesInfo, fetching any missing ones from the DB,
 // and repopulating the cache accordingly.
@@ -353,7 +339,7 @@ func (h *metricBatcher) setSeriesIds(rows []model.Insertable) (containsExemplars
 		return
 	}
 
-	labelArrayArray := pgtype.NewArrayType("prom_api.label_array[]", h.labelArrayOID, labelArrayTranscoder)
+	labelArrayArray := model.GetCustomType(model.LabelArray)
 	err = labelArrayArray.Set(labelArraySet)
 	if err != nil {
 		return containsExemplars, fmt.Errorf("Error setting series id: cannot set label_array: %w", err)

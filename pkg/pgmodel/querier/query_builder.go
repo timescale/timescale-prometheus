@@ -5,7 +5,9 @@
 package querier
 
 import (
+	"context"
 	"fmt"
+	"github.com/timescale/promscale/pkg/pgxconn"
 	"math"
 	"sort"
 	"strings"
@@ -122,6 +124,29 @@ var (
 	minTime = timestamp.FromTime(time.Unix(math.MinInt64/1000+62135596801, 0).UTC())
 	maxTime = timestamp.FromTime(time.Unix(math.MaxInt64/1000-62135596801, 999999999).UTC())
 )
+
+// GetMetricNameSeriesIDFromMatchers returns the metric name list and the corresponding series ID array
+// as a matrix.
+func GetMetricNameSeriesIDFromMatchers(conn pgxconn.PgxConn, matchers []*labels.Matcher) ([]string, [][]pgmodel.SeriesID, error) {
+	cb, err := BuildSubQueries(matchers)
+	if err != nil {
+		return nil, nil, fmt.Errorf("delete series build subqueries: %w", err)
+	}
+	clauses, values, err := cb.Build(true)
+	if err != nil {
+		return nil, nil, fmt.Errorf("delete series build clauses: %w", err)
+	}
+	query := BuildMetricNameSeriesIDQuery(clauses)
+	rows, err := conn.Query(context.Background(), query, values...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("build metric name series: %w", err)
+	}
+	metricNames, correspondingSeriesIDs, err := GetSeriesPerMetric(rows)
+	if err != nil {
+		return nil, nil, fmt.Errorf("series per metric: %w", err)
+	}
+	return metricNames, correspondingSeriesIDs, nil
+}
 
 func BuildSubQueries(matchers []*labels.Matcher) (*clauseBuilder, error) {
 	var err error
