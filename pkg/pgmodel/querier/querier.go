@@ -81,13 +81,13 @@ func (q *pgxQuerier) SelectSamples(mint, maxt int64, sortSeries bool, hints *sto
 	return ss, topNode
 }
 
-//func (q *pgxQuerier) SelectExemplars(mint, max int64, ms ...*labels.Matcher) error {
-//	metrics, seriesIDs, err := GetMetricNameSeriesIDFromMatchers(q.conn, ms)
-//	if err != nil {
-//		return fmt.Errorf("get metrics-seriesIDs from matchers: %w", err)
-//	}
-//
-//}
+func (q *pgxQuerier) SelectExemplars(mint, max int64, ms ...*labels.Matcher) error {
+	metrics, seriesIDs, err := GetMetricNameSeriesIDFromMatchers(q.conn, ms)
+	if err != nil {
+		return fmt.Errorf("get metrics-seriesIDs from matchers: %w", err)
+	}
+
+}
 
 // Query implements the Querier interface. It is the entry point for
 // remote-storage queries.
