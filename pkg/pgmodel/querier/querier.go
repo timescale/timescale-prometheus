@@ -72,7 +72,7 @@ var _ Querier = (*pgxQuerier)(nil)
 // SelectSamples implements the Querier interface. It is the entry point for our
 // own version of the Prometheus engine.
 func (q *pgxQuerier) SelectSamples(mint, maxt int64, sortSeries bool, hints *storage.SelectHints, path []parser.Node, ms ...*labels.Matcher) (storage.SeriesSet, parser.Node) {
-	rows, topNode, err := q.getResultRows(mint, maxt, hints, path, ms)
+	rows, topNode, err := q.getResultRows(schema.Data, mint, maxt, hints, path, ms)
 	if err != nil {
 		return errorSeriesSet{err: err}, nil
 	}
@@ -81,12 +81,14 @@ func (q *pgxQuerier) SelectSamples(mint, maxt int64, sortSeries bool, hints *sto
 	return ss, topNode
 }
 
-func (q *pgxQuerier) SelectExemplars(mint, max int64, ms ...*labels.Matcher) error {
-	metrics, seriesIDs, err := GetMetricNameSeriesIDFromMatchers(q.conn, ms)
+func (q *pgxQuerier) SelectExemplars(mint, maxt int64, ms ...*labels.Matcher) error {
+	rows, topNode, err := q.getResultRows(schema.Data, mint, maxt, nil, path, ms)
 	if err != nil {
-		return fmt.Errorf("get metrics-seriesIDs from matchers: %w", err)
+		return errorSeriesSet{err: err}, nil
 	}
 
+	ss := buildSeriesSet(rows, q.labelsReader)
+	return ss, topNode
 }
 
 // Query implements the Querier interface. It is the entry point for
@@ -101,7 +103,7 @@ func (q *pgxQuerier) Query(query *prompb.Query) ([]*prompb.TimeSeries, error) {
 		return nil, err
 	}
 
-	rows, _, err := q.getResultRows(query.StartTimestampMs, query.EndTimestampMs, nil, nil, matchers)
+	rows, _, err := q.getResultRows(schema.Data, query.StartTimestampMs, query.EndTimestampMs, nil, nil, matchers)
 	if err != nil {
 		return nil, err
 	}
@@ -145,7 +147,7 @@ type timescaleRow struct {
 
 // getResultRows fetches the result row datasets from the database using the
 // supplied query parameters.
-func (q *pgxQuerier) getResultRows(startTimestamp int64, endTimestamp int64, hints *storage.SelectHints, path []parser.Node, matchers []*labels.Matcher) ([]timescaleRow, parser.Node, error) {
+func (q *pgxQuerier) getResultRows(tableSchema string, startTimestamp int64, endTimestamp int64, hints *storage.SelectHints, path []parser.Node, matchers []*labels.Matcher) ([]timescaleRow, parser.Node, error) {
 	if q.rAuth != nil {
 		matchers = q.rAuth.AppendTenantMatcher(matchers)
 	}
@@ -170,20 +172,20 @@ func (q *pgxQuerier) getResultRows(startTimestamp int64, endTimestamp int64, hin
 		if err != nil {
 			return nil, nil, err
 		}
-		return q.querySingleMetric(metric, filter, clauses, values, hints, path)
+		return q.querySingleMetric(tableSchema, metric, filter, clauses, values, hints, path)
 	}
 
 	clauses, values, err := builder.Build(true)
 	if err != nil {
 		return nil, nil, err
 	}
-	return q.queryMultipleMetrics(filter, clauses, values)
+	return q.queryMultipleMetrics(tableSchema, filter, clauses, values)
 }
 
 // querySingleMetric returns all the result rows for a single metric using the
 // supplied query parameters. It uses the hints and node path to try to push
 // down query functions where possible.
-func (q *pgxQuerier) querySingleMetric(metric string, filter metricTimeRangeFilter, cases []string, values []interface{}, hints *storage.SelectHints, path []parser.Node) ([]timescaleRow, parser.Node, error) {
+func (q *pgxQuerier) querySingleMetric(tableSchema, metric string, filter metricTimeRangeFilter, cases []string, values []interface{}, hints *storage.SelectHints, path []parser.Node) ([]timescaleRow, parser.Node, error) {
 	tableName, err := q.getMetricTableName(metric)
 	if err != nil {
 		// If the metric table is missing, there are no results for this query.
@@ -195,7 +197,7 @@ func (q *pgxQuerier) querySingleMetric(metric string, filter metricTimeRangeFilt
 	}
 	filter.metric = tableName
 
-	sqlQuery, values, topNode, err := buildTimeseriesByLabelClausesQuery(filter, cases, values, hints, path)
+	sqlQuery, values, topNode, err := buildTimeseriesByLabelClausesQuery(tableSchema, filter, cases, values, hints, path)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -218,7 +220,7 @@ func (q *pgxQuerier) querySingleMetric(metric string, filter metricTimeRangeFilt
 
 // queryMultipleMetrics returns all the result rows for across multiple metrics
 // using the supplied query parameters.
-func (q *pgxQuerier) queryMultipleMetrics(filter metricTimeRangeFilter, cases []string, values []interface{}) ([]timescaleRow, parser.Node, error) {
+func (q *pgxQuerier) queryMultipleMetrics(tableSchema string, filter metricTimeRangeFilter, cases []string, values []interface{}) ([]timescaleRow, parser.Node, error) {
 	// First fetch series IDs per metric.
 	sqlQuery := BuildMetricNameSeriesIDQuery(cases)
 	rows, err := q.conn.Query(context.Background(), sqlQuery, values...)
@@ -250,7 +252,7 @@ func (q *pgxQuerier) queryMultipleMetrics(filter metricTimeRangeFilter, cases []
 			return nil, nil, err
 		}
 		filter.metric = tableName
-		sqlQuery = buildTimeseriesBySeriesIDQuery(filter, series[i])
+		sqlQuery = buildTimeseriesBySeriesIDQuery(tableSchema, filter, series[i])
 		batch.Queue(sqlQuery)
 		numQueries += 1
 	}

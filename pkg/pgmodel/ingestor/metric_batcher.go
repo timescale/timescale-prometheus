@@ -267,7 +267,6 @@ func (h *metricBatcher) orderExemplarLabelValues(data []model.Insertable) error 
 	return nil
 }
 
-
 type labelInfo struct {
 	labelID int32
 	Pos     int32

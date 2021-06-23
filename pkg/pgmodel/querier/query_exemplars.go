@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"github.com/timescale/promscale/pkg/pgmodel/common/schema"
-	"github.com/timescale/promscale/pkg/pgmodel/model"
+	// "github.com/timescale/promscale/pkg/pgmodel/model"
 	"github.com/timescale/promscale/pkg/pgxconn"
 )
 
@@ -13,13 +13,13 @@ const (
 	metricsContainingExemplars = "SELECT unnest($1::TEXT[]) INTERSECT SELECT metric_name FROM " + schema.Catalog + ".exemplar"
 )
 
-func (q *pgxQuerier) getExemplars(mint, maxt int64, metrics []string, seriesIDs [][]model.SeriesID) error {
-	ingestedExemplarMetrics, err := getMetricsContainingExemplars(q.conn, metrics)
-	if err != nil {
-		return fmt.Errorf("get metrics containing exemplars: %w", err)
-	}
-	
-}
+// func (q *pgxQuerier) getExemplars(mint, maxt int64, metrics []string, seriesIDs [][]model.SeriesID) error {
+// 	ingestedExemplarMetrics, err := getMetricsContainingExemplars(q.conn, metrics)
+// 	if err != nil {
+// 		return fmt.Errorf("get metrics containing exemplars: %w", err)
+// 	}
+
+// }
 
 func getMetricsContainingExemplars(conn pgxconn.PgxConn, metrics []string) ([]string, error) {
 	var exemplarMetrics []string
