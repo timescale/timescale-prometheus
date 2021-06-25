@@ -43,26 +43,32 @@ type exemplarInfo struct {
 // exist. This only does the most critical part of metric table creation, the
 // rest is handled by completeMetricTableCreation().
 func initializeMetricBatcher(conn pgxconn.PgxConn, metricName string, completeMetricCreationSignal chan struct{}, metricTableNames cache.MetricCache) (tableName string, err error) {
-	tableName, err = metricTableNames.Get(metricName)
+	// Metric batchers are always initialized with metric names of samples and not of exemplars.
+	tableName, err = metricTableNames.Get(metricName, false)
 	if err == errors.ErrEntryNotFound {
-		var possiblyNew bool
-		tableName, possiblyNew, err = model.MetricTableName(conn, metricName)
+		tableName, possiblyNew, err := model.MetricTableName(conn, metricName)
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("metric table name: %w", err)
 		}
 
-		//ignore error since this is just an optimization
-		_ = metricTableNames.Set(metricName, tableName)
+		// We ignore error here since this is just an optimization.
+		//
+		// Always set metric name while initializing with exemplars as false, since
+		// the metric name set here is via fetching the metric name from metric table.
+		//
+		// Metric table is filled during start, but exemplar table is filled when we
+		// first see an exemplar. Hence, that's the place to sent isExemplar as true.
+		_ = metricTableNames.Set(metricName, tableName, false)
 
 		if possiblyNew {
-			//pass a signal if there is space
+			// Pass a signal if there is space.
 			select {
 			case completeMetricCreationSignal <- struct{}{}:
 			default:
 			}
 		}
 	} else if err != nil {
-		return "", err
+		return "", fmt.Errorf("get metric name from metric table cache: %w", err)
 	}
 	return tableName, err
 }
@@ -76,9 +82,11 @@ func runMetricBatcher(conn pgxconn.PgxConn,
 	toCopiers chan copyRequest,
 	labelArrayOID uint32) {
 
-	var tableName string
-	var firstReq *insertDataRequest
-	firstReqSet := false
+	var (
+		tableName   string
+		firstReq    *insertDataRequest
+		firstReqSet = false
+	)
 	for firstReq = range input {
 		var err error
 		tableName, err = initializeMetricBatcher(conn, metricName, completeMetricCreationSignal, metricTableNames)
@@ -326,13 +334,13 @@ func (h *metricBatcher) setSeriesIds(rows []model.Insertable) (containsExemplars
 	//not across series.
 	dbEpoch, maxPos, err := h.fillLabelIDs(metricName, labelList, labelMap)
 	if err != nil {
-		return containsExemplars, fmt.Errorf("Error setting series ids: %w", err)
+		return containsExemplars, fmt.Errorf("error setting series ids: %w", err)
 	}
 
 	//create the label arrays
 	labelArraySet, seriesToInsert, err := createLabelArrays(seriesToInsert, labelMap, maxPos)
 	if err != nil {
-		return containsExemplars, fmt.Errorf("Error setting series ids: %w", err)
+		return containsExemplars, fmt.Errorf("error setting series ids: %w", err)
 	}
 	if len(labelArraySet) == 0 {
 		return
@@ -341,11 +349,11 @@ func (h *metricBatcher) setSeriesIds(rows []model.Insertable) (containsExemplars
 	labelArrayArray := model.GetCustomType(model.LabelArray)
 	err = labelArrayArray.Set(labelArraySet)
 	if err != nil {
-		return containsExemplars, fmt.Errorf("Error setting series id: cannot set label_array: %w", err)
+		return containsExemplars, fmt.Errorf("error setting series id: cannot set label_array: %w", err)
 	}
 	res, err := h.conn.Query(context.Background(), seriesInsertSQL, metricName, labelArrayArray)
 	if err != nil {
-		return containsExemplars, fmt.Errorf("Error setting series_id: cannot query for series_id: %w", err)
+		return containsExemplars, fmt.Errorf("error setting series_id: cannot query for series_id: %w", err)
 	}
 	defer res.Close()
 
@@ -357,13 +365,13 @@ func (h *metricBatcher) setSeriesIds(rows []model.Insertable) (containsExemplars
 		)
 		err := res.Scan(&id, &ordinality)
 		if err != nil {
-			return containsExemplars, fmt.Errorf("Error setting series_id: cannot scan series_id: %w", err)
+			return containsExemplars, fmt.Errorf("error setting series_id: cannot scan series_id: %w", err)
 		}
 		seriesToInsert[int(ordinality)-1].SetSeriesID(id, dbEpoch)
 		count++
 	}
 	if err := res.Err(); err != nil {
-		return containsExemplars, fmt.Errorf("Error setting series_id: reading series id rows: %w", err)
+		return containsExemplars, fmt.Errorf("error setting series_id: reading series id rows: %w", err)
 	}
 	if count != len(seriesToInsert) {
 		//This should never happen according to the logic. This is purely defensive.
@@ -386,7 +394,7 @@ func (h *metricBatcher) fillLabelIDs(metricName string, labelList *model.LabelLi
 	names, values := labelList.Get()
 	items := len(names.Elements)
 	if items != len(labelMap) {
-		return dbEpoch, 0, fmt.Errorf("Error filling labels: number of items in labelList and labelMap doesn't match")
+		return dbEpoch, 0, fmt.Errorf("error filling labels: number of items in labelList and labelMap doesn't match")
 	}
 	// The epoch will never decrease, so we can check it once at the beginning,
 	// at worst we'll store too small an epoch, which is always safe
@@ -406,11 +414,11 @@ func (h *metricBatcher) fillLabelIDs(metricName string, labelList *model.LabelLi
 		}
 		namesSlice, err := names.Slice(i, high)
 		if err != nil {
-			return dbEpoch, 0, fmt.Errorf("Error filling labels: slicing names: %w", err)
+			return dbEpoch, 0, fmt.Errorf("error filling labels: slicing names: %w", err)
 		}
 		valuesSlice, err := values.Slice(i, high)
 		if err != nil {
-			return dbEpoch, 0, fmt.Errorf("Error filling labels: slicing values: %w", err)
+			return dbEpoch, 0, fmt.Errorf("error filling labels: slicing values: %w", err)
 		}
 		batch.Queue("BEGIN;")
 		batch.Queue("SELECT * FROM "+schema.Catalog+".get_or_create_label_ids($1, $2, $3)", metricName, namesSlice, valuesSlice)
@@ -418,31 +426,31 @@ func (h *metricBatcher) fillLabelIDs(metricName string, labelList *model.LabelLi
 	}
 	br, err := h.conn.SendBatch(context.Background(), batch)
 	if err != nil {
-		return dbEpoch, 0, fmt.Errorf("Error filling labels: %w", err)
+		return dbEpoch, 0, fmt.Errorf("error filling labels: %w", err)
 	}
 	defer br.Close()
 
 	if _, err := br.Exec(); err != nil {
-		return dbEpoch, 0, fmt.Errorf("Error filling labels on begin: %w", err)
+		return dbEpoch, 0, fmt.Errorf("error filling labels on begin: %w", err)
 	}
 	err = br.QueryRow().Scan(&dbEpoch)
 	if err != nil {
-		return dbEpoch, 0, fmt.Errorf("Error filling labels: %w", err)
+		return dbEpoch, 0, fmt.Errorf("error filling labels: %w", err)
 	}
 	if _, err := br.Exec(); err != nil {
-		return dbEpoch, 0, fmt.Errorf("Error filling labels on commit: %w", err)
+		return dbEpoch, 0, fmt.Errorf("error filling labels on commit: %w", err)
 	}
 
 	var count int
 	for i := 0; i < labelBatches; i++ {
 		if _, err := br.Exec(); err != nil {
-			return dbEpoch, 0, fmt.Errorf("Error filling labels on begin label batch: %w", err)
+			return dbEpoch, 0, fmt.Errorf("error filling labels on begin label batch: %w", err)
 		}
 
 		err := func() error {
 			rows, err := br.Query()
 			if err != nil {
-				return fmt.Errorf("Error filling labels: %w", err)
+				return fmt.Errorf("error filling labels: %w", err)
 			}
 			defer rows.Close()
 
@@ -455,12 +463,12 @@ func (h *metricBatcher) fillLabelIDs(metricName string, labelList *model.LabelLi
 				res := labelInfo{}
 				err := rows.Scan(&res.Pos, &res.labelID, &labelName, &labelValue)
 				if err != nil {
-					return fmt.Errorf("Error filling labels in scan: %w", err)
+					return fmt.Errorf("error filling labels in scan: %w", err)
 				}
 				key := labels.Label{Name: labelName.Get().(string), Value: labelValue.Get().(string)}
 				_, ok := labelMap[key]
 				if !ok {
-					return fmt.Errorf("Error filling labels: getting a key never sent to the db")
+					return fmt.Errorf("error filling labels: getting a key never sent to the db")
 				}
 				labelMap[key] = res
 				if int(res.Pos) > maxPos {
@@ -469,7 +477,7 @@ func (h *metricBatcher) fillLabelIDs(metricName string, labelList *model.LabelLi
 				count++
 			}
 			if err := rows.Err(); err != nil {
-				return fmt.Errorf("Error filling labels: error reading label id rows: %w", err)
+				return fmt.Errorf("error filling labels: error reading label id rows: %w", err)
 			}
 			return nil
 		}()
@@ -477,11 +485,11 @@ func (h *metricBatcher) fillLabelIDs(metricName string, labelList *model.LabelLi
 			return dbEpoch, 0, err
 		}
 		if _, err := br.Exec(); err != nil {
-			return dbEpoch, 0, fmt.Errorf("Error filling labels on commit label batch: %w", err)
+			return dbEpoch, 0, fmt.Errorf("error filling labels on commit label batch: %w", err)
 		}
 	}
 	if count != items {
-		return dbEpoch, 0, fmt.Errorf("Error filling labels: not filling as many items as expected: %v vs %v", count, items)
+		return dbEpoch, 0, fmt.Errorf("error filling labels: not filling as many items as expected: %v vs %v", count, items)
 	}
 	return dbEpoch, maxPos, nil
 }
@@ -500,10 +508,10 @@ func createLabelArrays(series []*model.Series, labelMap map[labels.Label]labelIn
 			key := labels.Label{Name: names[i], Value: values[i]}
 			res, ok := labelMap[key]
 			if !ok {
-				return nil, nil, fmt.Errorf("Error generating label array: missing key in map")
+				return nil, nil, fmt.Errorf("error generating label array: missing key in map")
 			}
 			if res.labelID == 0 {
-				return nil, nil, fmt.Errorf("Error generating label array: missing id for label %v=>%v", names[i], values[i])
+				return nil, nil, fmt.Errorf("error generating label array: missing id for label %v=>%v", names[i], values[i])
 			}
 			//Pos is 1-indexed, slices are 0-indexed
 			sliceIndex := int(res.Pos) - 1
@@ -521,7 +529,7 @@ func createLabelArrays(series []*model.Series, labelMap map[labels.Label]labelIn
 		dest++
 	}
 	if len(labelArraySet) != len(series[:dest]) {
-		return nil, nil, fmt.Errorf("Error generating label array: lengths not equal")
+		return nil, nil, fmt.Errorf("error generating label array: lengths not equal")
 	}
 	return labelArraySet, series[:dest], nil
 }

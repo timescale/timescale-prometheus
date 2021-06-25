@@ -26,7 +26,7 @@ const (
 // pgxSeriesSet implements storage.SeriesSet.
 type pgxSeriesSet struct {
 	rowIdx  int
-	rows    []timescaleRow
+	rows    []sampleRow
 	err     error
 	querier labelQuerier
 }
@@ -34,7 +34,7 @@ type pgxSeriesSet struct {
 // pgxSeriesSet must implement storage.SeriesSet
 var _ storage.SeriesSet = (*pgxSeriesSet)(nil)
 
-func buildSeriesSet(rows []timescaleRow, querier labelQuerier) storage.SeriesSet {
+func buildSeriesSet(rows []sampleRow, querier labelQuerier) storage.SeriesSet {
 	return &pgxSeriesSet{
 		rows:    rows,
 		querier: querier,
@@ -96,7 +96,7 @@ func (p *pgxSeriesSet) At() storage.Series {
 // Err implements storage.SeriesSet.
 func (p *pgxSeriesSet) Err() error {
 	if p.err != nil {
-		return fmt.Errorf("Error retrieving series set: %w", p.err)
+		return fmt.Errorf("error retrieving series set: %w", p.err)
 	}
 	return nil
 }

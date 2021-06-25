@@ -7,11 +7,12 @@ package querier
 import (
 	"context"
 	"fmt"
-	"github.com/timescale/promscale/pkg/pgxconn"
 	"math"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/timescale/promscale/pkg/pgxconn"
 
 	"github.com/jackc/pgx/v4"
 	"github.com/prometheus/common/model"
@@ -104,13 +105,13 @@ const (
 	Future optimizations:
 	  - different query if scanning entire metric (not labels matchers besides __name__)
 	*/
-	timeseriesByMetricSQLFormat = `SELECT series.labels, result.time_array, result.value_array %[9]s
+	timeseriesByMetricSQLFormat = `SELECT series.labels, result.time_array, result.value_array%[10]s
 	FROM %[2]s series
 	INNER JOIN LATERAL (
-		SELECT %[6]s as time_array, %[7]s as value_array
+		SELECT %[6]s as time_array, %[7]s as value_array%[9]s
 		FROM
 		(
-			SELECT time, value %[8]s
+			SELECT time, value%[8]s
 			FROM %[1]s metric
 			WHERE metric.series_id = series.id
 			AND time >= '%[4]s'
@@ -280,7 +281,7 @@ func (c *clauseBuilder) Build(includeMetricName bool) ([]string, []interface{}, 
 	return c.clauses, c.args, nil
 }
 
-func buildTimeSeries(rows []timescaleRow, lr lreader.LabelsReader) ([]*prompb.TimeSeries, error) {
+func buildTimeSeries(rows []sampleRow, lr lreader.LabelsReader) ([]*prompb.TimeSeries, error) {
 	results := make([]*prompb.TimeSeries, 0, len(rows))
 
 	for _, row := range rows {
@@ -353,10 +354,11 @@ func buildTimeseriesByLabelClausesQuery(tableSchema string, filter metricTimeRan
 	if err != nil {
 		return "", nil, nil, err
 	}
-	var exemplarInnerField, exemplarOuterField string
+	var exemplarInnerField, exemplarMiddleField, exemplarOuterField string
 	if tableSchema == schema.Exemplar {
 		exemplarInnerField = ", exemplar_label_values"
-		exemplarOuterField = ", result.exemplar_label_values"
+		exemplarMiddleField = ", array_agg(exemplar_label_values) as exemplar_label_value_array"
+		exemplarOuterField = ", result.exemplar_label_value_array"
 	}
 	finalSQL := fmt.Sprintf(timeseriesByMetricSQLFormat,
 		pgx.Identifier{tableSchema, filter.metric}.Sanitize(),
@@ -367,6 +369,7 @@ func buildTimeseriesByLabelClausesQuery(tableSchema string, filter metricTimeRan
 		timeClauseBound,
 		valueClauseBound,
 		exemplarInnerField,
+		exemplarMiddleField,
 		exemplarOuterField,
 	)
 

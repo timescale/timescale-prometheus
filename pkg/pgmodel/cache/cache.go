@@ -15,17 +15,6 @@ const (
 	DefaultMetricCacheSize = 10000
 )
 
-// MetricCache provides a caching mechanism for metric table names.
-type MetricCache interface {
-	Get(metric string) (string, error)
-	Set(metric string, tableName string) error
-	// Len returns the number of metrics cached in the system.
-	Len() int
-	// Cap returns the capacity of the metrics cache.
-	Cap() int
-	Evictions() uint64
-}
-
 type LabelsCache interface {
 	// GetValues tries to get a batch of keys and store the corresponding values is valuesOut
 	// returns the number of keys that were actually found.
@@ -46,6 +35,24 @@ type LabelsCache interface {
 	Evictions() uint64
 }
 
+// MetricCache provides a caching mechanism for metric table names.
+type MetricCache interface {
+	// Get returns the TableInfo if the given metric is present, otherwise
+	// returns an errors.ErrEntryNotFound.
+	Get(metric string, shouldBeExemplar bool) (string, error)
+	// Set sets the table name corresponding to the given metric. It also
+	// saves whether the incoming entry is for exemplar or not, as
+	// ingested exemplars have a different table than ingested samples,
+	// since ingestion of exemplars is independent of samples.
+	Set(metric, tableName string, isExemplar bool) error
+	// Len returns the number of metrics cached in the system.
+	Len() int
+	// Cap returns the capacity of the metrics cache.
+	Cap() int
+	Evictions() uint64
+}
+
+// todo: make this struct private only
 // MetricNameCache stores and retrieves metric table names in a in-memory cache.
 type MetricNameCache struct {
 	Metrics *clockcache.Cache
@@ -56,16 +63,23 @@ func NewMetricCache(config Config) *MetricNameCache {
 }
 
 // Get fetches the table name for specified metric.
-func (m *MetricNameCache) Get(metric string) (string, error) {
-	result, ok := m.Metrics.Get(metric)
+func (m *MetricNameCache) Get(metric string, shouldBeExemplar bool) (string, error) {
+	result, ok := m.Metrics.Get(metricInfo{metric, shouldBeExemplar})
 	if !ok {
 		return "", errors.ErrEntryNotFound
 	}
 	return result.(string), nil
 }
 
+// metricInfo contains the metric name along with whether the (metric) entry is
+// for exemplar or not.
+type metricInfo struct {
+	MetricName string
+	IsExemplar bool
+}
+
 // Set stores table name for specified metric.
-func (m *MetricNameCache) Set(metric string, tableName string) error {
+func (m *MetricNameCache) Set(metric string, tableName string, isExemplar bool) error {
 	// deep copy the strings so the original memory doesn't need to stick around
 	metricBuilder := strings.Builder{}
 	metricBuilder.Grow(len(metric))
@@ -74,7 +88,7 @@ func (m *MetricNameCache) Set(metric string, tableName string) error {
 	tableBuilder.Grow(len(tableName))
 	tableBuilder.WriteString(tableName)
 	//size includes an 8-byte overhead for each string
-	m.Metrics.Insert(metricBuilder.String(), tableBuilder.String(), uint64(metricBuilder.Len()+tableBuilder.Len()+16))
+	m.Metrics.Insert(metricInfo{metricBuilder.String(), isExemplar}, tableBuilder.String(), uint64(metricBuilder.Len()+tableBuilder.Len()+16))
 	return nil
 }
 
