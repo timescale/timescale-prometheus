@@ -204,7 +204,15 @@ func respondQuery(w http.ResponseWriter, res *promql.Result, warnings storage.Wa
 	}
 }
 
-func respond(w http.ResponseWriter, status int, message string) {
+func respondExemplar(w http.ResponseWriter, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(&response{
+		Status: "success",
+		Data:   data,
+	})
+}
+
+func respond(w http.ResponseWriter, status int, message interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)

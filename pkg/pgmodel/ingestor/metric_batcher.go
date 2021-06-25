@@ -44,9 +44,10 @@ type exemplarInfo struct {
 // rest is handled by completeMetricTableCreation().
 func initializeMetricBatcher(conn pgxconn.PgxConn, metricName string, completeMetricCreationSignal chan struct{}, metricTableNames cache.MetricCache) (tableName string, err error) {
 	// Metric batchers are always initialized with metric names of samples and not of exemplars.
+	var possiblyNew bool
 	tableName, err = metricTableNames.Get(metricName, false)
 	if err == errors.ErrEntryNotFound {
-		tableName, possiblyNew, err := model.MetricTableName(conn, metricName)
+		tableName, possiblyNew, err = model.MetricTableName(conn, metricName)
 		if err != nil {
 			return "", fmt.Errorf("metric table name: %w", err)
 		}

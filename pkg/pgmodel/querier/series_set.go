@@ -23,19 +23,19 @@ const (
 	PostgresUnixEpoch = -946684800000
 )
 
-// pgxSeriesSet implements storage.SeriesSet.
-type pgxSeriesSet struct {
+// pgxSamplesSeriesSet implements storage.SeriesSet.
+type pgxSamplesSeriesSet struct {
 	rowIdx  int
 	rows    []sampleRow
 	err     error
 	querier labelQuerier
 }
 
-// pgxSeriesSet must implement storage.SeriesSet
-var _ storage.SeriesSet = (*pgxSeriesSet)(nil)
+// pgxSamplesSeriesSet must implement storage.SeriesSet
+var _ storage.SeriesSet = (*pgxSamplesSeriesSet)(nil)
 
 func buildSeriesSet(rows []sampleRow, querier labelQuerier) storage.SeriesSet {
-	return &pgxSeriesSet{
+	return &pgxSamplesSeriesSet{
 		rows:    rows,
 		querier: querier,
 		rowIdx:  -1,
@@ -43,7 +43,7 @@ func buildSeriesSet(rows []sampleRow, querier labelQuerier) storage.SeriesSet {
 }
 
 // Next forwards the internal cursor to next storage.Series
-func (p *pgxSeriesSet) Next() bool {
+func (p *pgxSamplesSeriesSet) Next() bool {
 	if p.rowIdx >= len(p.rows) {
 		return false
 	}
@@ -58,7 +58,7 @@ func (p *pgxSeriesSet) Next() bool {
 }
 
 // At returns the current storage.Series.
-func (p *pgxSeriesSet) At() storage.Series {
+func (p *pgxSamplesSeriesSet) At() storage.Series {
 	if p.rowIdx >= len(p.rows) {
 		return nil
 	}
@@ -94,14 +94,14 @@ func (p *pgxSeriesSet) At() storage.Series {
 }
 
 // Err implements storage.SeriesSet.
-func (p *pgxSeriesSet) Err() error {
+func (p *pgxSamplesSeriesSet) Err() error {
 	if p.err != nil {
 		return fmt.Errorf("error retrieving series set: %w", p.err)
 	}
 	return nil
 }
 
-func (p *pgxSeriesSet) Warnings() storage.Warnings { return nil }
+func (p *pgxSamplesSeriesSet) Warnings() storage.Warnings { return nil }
 
 // pgxSeries implements storage.Series.
 type pgxSeries struct {
