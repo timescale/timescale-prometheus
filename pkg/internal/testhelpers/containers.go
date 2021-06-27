@@ -52,11 +52,12 @@ var (
 type ExtensionState int
 
 const (
-	timescaleBit  = 1 << iota
-	promscaleBit  = 1 << iota
-	timescale2Bit = 1 << iota
-	multinodeBit  = 1 << iota
-	postgres12Bit = 1 << iota
+	timescaleBit    = 1 << iota
+	promscaleBit    = 1 << iota
+	timescale2Bit   = 1 << iota
+	multinodeBit    = 1 << iota
+	postgres12Bit   = 1 << iota
+	timescaleOSSBit = 1 << iota
 )
 
 const (
@@ -67,6 +68,7 @@ const (
 	Timescale2AndPromscale ExtensionState = timescaleBit | timescale2Bit | promscaleBit
 	Multinode              ExtensionState = timescaleBit | timescale2Bit | multinodeBit
 	MultinodeAndPromscale  ExtensionState = timescaleBit | timescale2Bit | multinodeBit | promscaleBit
+	TimescaleOSSLatest     ExtensionState = timescaleBit | timescale2Bit | timescaleOSSBit
 )
 
 func (e *ExtensionState) UseTimescaleDB() {
@@ -89,6 +91,10 @@ func (e *ExtensionState) UsePG12() {
 	*e |= postgres12Bit
 }
 
+func (e *ExtensionState) UseTimescaleDBOSS() {
+	*e |= timescaleBit | timescale2Bit | timescaleOSSBit
+}
+
 func (e ExtensionState) UsesTimescaleDB() bool {
 	return (e & timescaleBit) != 0
 }
@@ -107,6 +113,10 @@ func (e ExtensionState) usesPromscale() bool {
 
 func (e ExtensionState) UsesPG12() bool {
 	return (e & postgres12Bit) != 0
+}
+
+func (e ExtensionState) UsesTimescaleDBOSS() bool {
+	return (e & timescaleOSSBit) != 0
 }
 
 var (
@@ -288,6 +298,7 @@ func StartPGContainer(
 	PGTag := "pg" + PGMajor
 
 	promscaleImageBase := "timescaledev/promscale-extension"
+	fmt.Println("state", extensionState, "with bit", extensionState&^postgres12Bit)
 	switch extensionState &^ postgres12Bit {
 	case MultinodeAndPromscale:
 		image = promscaleImageBase + ":latest-ts2-" + PGTag
@@ -309,6 +320,8 @@ func StartPGContainer(
 		image = "timescale/timescaledb:1.7.4-pg12"
 	case VanillaPostgres:
 		image = "postgres:" + PGMajor
+	case TimescaleOSSLatest:
+		image = "timescale/timescaledb:latest-pg13-oss"
 	}
 
 	return StartDatabaseImage(ctx, image, testDataDir, "", printLogs, extensionState)
@@ -497,10 +510,12 @@ func startPGInstance(
 		container.FollowOutput(stdoutLogConsumer{})
 	}
 
+	fmt.Println("came ")
 	err = container.Start(context.Background())
 	if err != nil {
 		return nil, nil, err
 	}
+	fmt.Println("crossedd")
 
 	if printLogs {
 		err = container.StartLogProducer(context.Background())
