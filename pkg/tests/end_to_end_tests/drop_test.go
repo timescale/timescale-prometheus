@@ -166,7 +166,7 @@ func TestSQLDropChunk(t *testing.T) {
 		}
 
 		var tableName string
-		err = db.QueryRow(context.Background(), "SELECT table_name FROM _prom_catalog.get_metric_table_name_if_exists('test')").Scan(&tableName)
+		err = db.QueryRow(context.Background(), "SELECT table_name FROM _prom_catalog.get_metric_table_name_if_exists('prom_data', 'test')").Scan(&tableName)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -250,7 +250,7 @@ func TestSQLDropDataWithoutTimescaleDB(t *testing.T) {
 		}
 
 		var tableName string
-		err = db.QueryRow(context.Background(), "SELECT table_name FROM _prom_catalog.get_metric_table_name_if_exists('test')").Scan(&tableName)
+		err = db.QueryRow(context.Background(), "SELECT table_name FROM _prom_catalog.get_metric_table_name_if_exists('prom_data', 'test')").Scan(&tableName)
 		if err != nil {
 			t.Fatal(err)
 		}

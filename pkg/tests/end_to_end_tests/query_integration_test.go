@@ -98,6 +98,41 @@ func (c *PromClient) Read(rr *prompb.ReadRequest) (*prompb.ReadResponse, error) 
 	return res, nil
 }
 
+func TestDroppedViewQuery(t *testing.T) {
+	withDB(t, *testDatabase, func(db *pgxpool.Pool, t testing.TB) {
+		// Ingest test dataset.
+		ingestQueryTestDataset(db, t, generateSmallTimeseries())
+		// Drop the view.
+		if _, err := db.Exec(context.Background(), `DROP VIEW prom_view.metric_view`); err != nil {
+			t.Fatalf("unexpected error while dropping metric view: %s", err)
+		}
+		// Getting a read-only connection to ensure read path is idempotent.
+		readOnly := testhelpers.GetReadOnlyConnection(t, *testDatabase)
+		defer readOnly.Close()
+
+		mCache := &cache.MetricNameCache{Metrics: clockcache.WithMax(cache.DefaultMetricCacheSize)}
+		lCache := clockcache.WithMax(100)
+		dbConn := pgxconn.NewPgxConn(readOnly)
+		labelsReader := lreader.NewLabelsReader(dbConn, lCache)
+		r := querier.NewQuerier(dbConn, mCache, labelsReader, nil)
+		_, err := r.Query(&prompb.Query{
+			Matchers: []*prompb.LabelMatcher{
+				{
+					Type:  prompb.LabelMatcher_EQ,
+					Name:  pgmodel.MetricNameLabelName,
+					Value: "metric_view",
+				},
+			},
+			StartTimestampMs: 1,
+			EndTimestampMs:   3,
+		})
+
+		if err == nil {
+			t.Fatalf("expected an error, got nil")
+		}
+	})
+}
+
 func TestSQLQuery(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test")
@@ -146,6 +181,36 @@ func TestSQLQuery(t *testing.T) {
 				{
 					Labels: []prompb.Label{
 						{Name: pgmodel.MetricNameLabelName, Value: "firstMetric"},
+						{Name: "common", Value: "tag"},
+						{Name: "empty", Value: ""},
+						{Name: "foo", Value: "bar"},
+					},
+					Samples: []prompb.Sample{
+						{Timestamp: 1, Value: 0.1},
+						{Timestamp: 2, Value: 0.2},
+						{Timestamp: 3, Value: 0.3},
+					},
+				},
+			},
+		},
+		{
+			name: "one matcher, view metric",
+			query: &prompb.Query{
+				Matchers: []*prompb.LabelMatcher{
+					{
+						Type:  prompb.LabelMatcher_EQ,
+						Name:  pgmodel.MetricNameLabelName,
+						Value: "metric_view",
+					},
+				},
+				StartTimestampMs: 1,
+				EndTimestampMs:   3,
+			},
+			expectResponse: []*prompb.TimeSeries{
+				{
+					Labels: []prompb.Label{
+						{Name: pgmodel.MetricNameLabelName, Value: "metric_view"},
+						{Name: pgmodel.SchemaNameLabelName, Value: "prom_view"},
 						{Name: "common", Value: "tag"},
 						{Name: "empty", Value: ""},
 						{Name: "foo", Value: "bar"},
@@ -655,13 +720,46 @@ func ingestQueryTestDataset(db *pgxpool.Pool, t testing.TB, metrics []prompb.Tim
 	}
 
 	expectedCount := 0
+	firstMetricName := ""
 
 	for _, ts := range metrics {
 		expectedCount = expectedCount + len(ts.Samples)
+
+		if firstMetricName == "" {
+			for _, l := range ts.Labels {
+				if l.Name == labels.MetricName {
+					firstMetricName = l.Value
+					break
+				}
+			}
+		}
 	}
 
 	if cnt != uint64(expectedCount) {
 		t.Fatalf("wrong amount of metrics ingested: got %d, wanted %d", cnt, expectedCount)
+	}
+
+	// Create view and register as metric view based on the first metric.
+	if firstMetricName == "" {
+		t.Fatal("unexpected error while ingesting test dataset: missing first metric name")
+	}
+
+	row := db.QueryRow(context.Background(), "SELECT table_name FROM _prom_catalog.get_metric_table_name_if_exists('prom_data', $1)", firstMetricName)
+
+	if err = row.Scan(&firstMetricName); err != nil {
+		t.Fatalf("unexpected error while creating metric view: couldn't get first metric table name: %v", err)
+	}
+	if _, err = db.Exec(context.Background(), "CALL _prom_catalog.finalize_metric_creation()"); err != nil {
+		t.Fatalf("unexpected error while ingesting test dataset: %s", err)
+	}
+	if _, err = db.Exec(context.Background(), "CREATE SCHEMA prom_view"); err != nil {
+		t.Fatalf("unexpected error while ingesting test dataset: %s", err)
+	}
+	if _, err = db.Exec(context.Background(), fmt.Sprintf(`CREATE VIEW prom_view.metric_view AS SELECT * FROM prom_data."%s"`, firstMetricName)); err != nil {
+		t.Fatalf("unexpected error while ingesting test dataset: %s", err)
+	}
+	if _, err = db.Exec(context.Background(), "SELECT _prom_catalog.register_metric_view('prom_view', 'metric_view')"); err != nil {
+		t.Fatalf("unexpected error while ingesting test dataset: %s", err)
 	}
 }
 
@@ -1108,6 +1206,17 @@ func TestPushdownDelta(t *testing.T) {
 				Value: promql.Vector{promql.Sample{
 					Point:  promql.Point{V: 20, T: startTime + 300*1000},
 					Metric: labels.FromStrings("foo", "bar", "instance", "1", "aaa", "000")},
+				},
+			},
+		},
+		{
+			name:  "View metric matcher which matches metric_1",
+			query: `delta(metric_view{instance="1"}[5m])`,
+			endMs: startTime + 300*1000,
+			res: promql.Result{
+				Value: promql.Vector{promql.Sample{
+					Point:  promql.Point{V: 20, T: startTime + 300*1000},
+					Metric: labels.FromStrings(pgmodel.SchemaNameLabelName, "prom_view", "foo", "bar", "instance", "1", "aaa", "000")},
 				},
 			},
 		},
