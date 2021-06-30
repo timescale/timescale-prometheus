@@ -8,15 +8,19 @@ package runner
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"time"
 
 	_ "github.com/jackc/pgx/v4/stdlib"
+	"github.com/thanos-io/thanos/pkg/store/storepb"
 	"github.com/timescale/promscale/pkg/api"
 	"github.com/timescale/promscale/pkg/log"
+	"github.com/timescale/promscale/pkg/thanos"
 	"github.com/timescale/promscale/pkg/util"
 	tput "github.com/timescale/promscale/pkg/util/throughput"
 	"github.com/timescale/promscale/pkg/version"
+	"google.golang.org/grpc"
 )
 
 const promLivenessCheck = time.Second
@@ -61,6 +65,25 @@ func Run(cfg *Config) error {
 
 	log.Info("msg", "Starting up...")
 	log.Info("msg", "Listening", "addr", cfg.ListenAddr)
+
+	srv := thanos.NewStorage(client.Queryable())
+	grpcServer := grpc.NewServer()
+	storepb.RegisterStoreServer(grpcServer, srv)
+
+	go func() {
+		log.Info("msg", fmt.Sprintf("Start listening %s", cfg.GrpcListenAddr))
+		listener, err := net.Listen("tcp", cfg.GrpcListenAddr)
+		if err != nil {
+			log.Error("msg", "Listening grpc-server", "err", err)
+			return
+		}
+
+		log.Info("msg", "Start thanos-store")
+		if err := grpcServer.Serve(listener); err != nil {
+			log.Error("msg", "Starting grpc-server", "err", err)
+			return
+		}
+	}()
 
 	mux := http.NewServeMux()
 	mux.Handle("/", router)
