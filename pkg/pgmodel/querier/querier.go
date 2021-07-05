@@ -7,6 +7,7 @@ package querier
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/jackc/pgconn"
@@ -98,7 +99,7 @@ func (q *pgxQuerier) Select(mint, maxt int64, _ bool, hints *storage.SelectHints
 		return errorSeriesSet{err: err}, nil
 	}
 
-	ss := buildSeriesSet(rows.([]sampleRow), q.labelsReader)
+	ss := buildSeriesSet(rows.([]seriesRow), q.labelsReader)
 	return ss, topNode
 }
 
@@ -138,48 +139,70 @@ func (eq *pgxExemplarQuerier) Select(start, end time.Time, matchersList ...[]*la
 	var (
 		numMatchers = len(matchersList)
 		results     = make([]model.ExemplarQueryResult, 0, numMatchers)
-		res         = make(chan interface{}, numMatchers)
+		rowsCh      = make(chan interface{}, numMatchers)
 	)
 	for _, matchers := range matchersList {
 		go func(m []*labels.Matcher) {
-			fmt.Println("m", m)
 			rows, _, err := eq.pgx.getResultRows(schema.Exemplar, timestamp.FromTime(start), timestamp.FromTime(end), nil, nil, m)
 			if rows == nil {
 				// Result does not exists.
-				res <- nil
+				rowsCh <- nil
 				return
 			}
 			if err != nil {
-				res <- err
+				rowsCh <- err
 				return
 			}
-			res <- rows.(*exemplarResult)
+			rowsCh <- rows
 		}(matchers)
 	}
 
 	// Listen to responses.
 	var err error
+	shouldProceed := func() bool {
+		// Append rows as long as the error is nil. Once we have an error,
+		// appending response is just wasting memory as there is no use of it.
+		return err == nil
+	}
 	for i := 0; i < numMatchers; i++ {
-		resp := <-res
+		resp := <-rowsCh
 		switch out := resp.(type) {
-		case *exemplarResult:
-			// Keep appending as long as error is nil. Once we have an error, appending response is of no use.
-			result, prepareErr := prepareExemplarQueryResult(eq.conn, eq.pgx.labelsReader, eq.exemplarKeyPosCache, out)
+		case exemplarSeriesRow:
+			if !shouldProceed() {
+				continue
+			}
+			exemplars, prepareErr := prepareExemplarQueryResult(eq.conn, eq.pgx.labelsReader, eq.exemplarKeyPosCache, out)
 			if prepareErr != nil {
 				err = prepareErr
 				continue
 			}
-			results = append(results, result)
-		case error:
-			if err == nil {
-				err = out
+			results = append(results, exemplars)
+		case []exemplarSeriesRow:
+			if !shouldProceed() {
+				continue
 			}
+			for _, seriesRow := range out {
+				exemplars, prepareErr := prepareExemplarQueryResult(eq.conn, eq.pgx.labelsReader, eq.exemplarKeyPosCache, seriesRow)
+				if prepareErr != nil {
+					err = prepareErr
+					continue
+				}
+				results = append(results, exemplars)
+			}
+		case error:
+			if !shouldProceed() {
+				continue
+			}
+			err = out // Only capture the first error.
 		case nil:
 		}
 	}
 	if err != nil {
 		return results, fmt.Errorf("selecting exemplars: %w", err)
 	}
+	sort.Slice(results, func(i, j int) bool {
+		return labels.Compare(results[i].SeriesLabels, results[j].SeriesLabels) < 0
+	})
 	return results, nil
 }
 
@@ -200,7 +223,7 @@ func (q *pgxQuerier) Query(query *prompb.Query) ([]*prompb.TimeSeries, error) {
 		return nil, err
 	}
 
-	results, err := buildTimeSeries(rows.([]sampleRow), q.labelsReader)
+	results, err := buildTimeSeries(rows.([]seriesRow), q.labelsReader)
 	return results, err
 }
 
@@ -230,14 +253,14 @@ func fromLabelMatchers(matchers []*prompb.LabelMatcher) ([]*labels.Matcher, erro
 	return result, nil
 }
 
-type sampleRow struct {
+type seriesRow struct {
 	labelIds []int64
 	times    pgtype.TimestamptzArray
 	values   pgtype.Float8Array
 	err      error
 }
 
-type exemplarResult struct {
+type exemplarSeriesRow struct {
 	metricName string
 	labelIds   []int64
 	data       []exemplarRow
@@ -305,6 +328,7 @@ func (q *pgxQuerier) querySingleMetric(tableSchema, metric string, filter metric
 		return nil, nil, err
 	}
 
+	fmt.Println("sqlQuery", sqlQuery, values)
 	rows, err := q.conn.Query(context.Background(), sqlQuery, values...)
 	if err != nil {
 		// If we are getting undefined table error, it means the query
@@ -319,22 +343,17 @@ func (q *pgxQuerier) querySingleMetric(tableSchema, metric string, filter metric
 	// TODO this allocation assumes we usually have 1 row, if not, refactor
 	switch tableSchema {
 	case schema.Data:
-		samplesRows, err := appendSampleRows(make([]sampleRow, 0, 1), rows)
+		samplesRows, err := appendSampleRows(make([]seriesRow, 0, 1), rows)
 		if err != nil {
 			return nil, topNode, fmt.Errorf("appending sample rows: %w", err)
 		}
 		return samplesRows, topNode, nil
 	case schema.Exemplar:
-		exemplarRows, labelIds, err := appendExemplarRows(make([]exemplarRow, 0), rows)
+		exemplarSeriesRows, err := appendExemplarRows(metric, rows)
 		if err != nil {
 			return nil, topNode, fmt.Errorf("appending exemplar rows: %w", err)
 		}
-		exemplarResult := &exemplarResult{
-			metricName: metric,
-			labelIds:   labelIds,
-			data:       exemplarRows,
-		}
-		return exemplarResult, topNode, nil
+		return exemplarSeriesRows, nil, nil
 	default:
 		panic("invalid schema")
 	}
@@ -342,7 +361,7 @@ func (q *pgxQuerier) querySingleMetric(tableSchema, metric string, filter metric
 
 // queryMultipleMetrics returns all the result rows for across multiple metrics
 // using the supplied query parameters.
-func (q *pgxQuerier) queryMultipleMetrics(tableSchema string, filter metricTimeRangeFilter, cases []string, values []interface{}) ([]sampleRow, parser.Node, error) {
+func (q *pgxQuerier) queryMultipleMetrics(tableSchema string, filter metricTimeRangeFilter, cases []string, values []interface{}) (interface{}, parser.Node, error) {
 	// First fetch series IDs per metric.
 	sqlQuery := BuildMetricNameSeriesIDQuery(cases)
 	rows, err := q.conn.Query(context.Background(), sqlQuery, values...)
@@ -357,8 +376,18 @@ func (q *pgxQuerier) queryMultipleMetrics(tableSchema string, filter metricTimeR
 	}
 
 	// TODO this assume on average on row per-metric. Is this right?
-	results := make([]sampleRow, 0, len(metrics))
-	//results := make([]exemplarRow, 0, len(metrics))
+	var (
+		results          interface{}
+		metricTableNames = make([]string, 0, len(metrics)) // This will be required to fill the `metricName` field of exemplarResult.
+	)
+	switch tableSchema {
+	case schema.Data:
+		results = make([]seriesRow, 0, len(metrics))
+	case schema.Exemplar:
+		results = make([]exemplarSeriesRow, 0, len(metrics))
+	default:
+		panic("invalid type")
+	}
 
 	numQueries := 0
 	batch := q.conn.NewBatch()
@@ -376,10 +405,11 @@ func (q *pgxQuerier) queryMultipleMetrics(tableSchema string, filter metricTimeR
 		}
 		filter.metric = tableName
 		sqlQuery, err := buildTimeseriesBySeriesIDQuery(tableSchema, filter, series[i])
-		//fmt.Println(sqlQuery)
+		fmt.Println(sqlQuery)
 		if err != nil {
 			return nil, nil, fmt.Errorf("build timeseries by series-id: %w", err)
 		}
+		metricTableNames = append(metricTableNames, tableName)
 		batch.Queue(sqlQuery)
 		numQueries += 1
 	}
@@ -397,29 +427,36 @@ func (q *pgxQuerier) queryMultipleMetrics(tableSchema string, filter metricTimeR
 			return nil, nil, err
 		}
 		// Append all rows into results.
-		//results, err = appendSampleRows(results, rows)
-		for rows.Next() {
-			var (
-				labelIds  []int64
-				times     pgtype.TimestamptzArray
-				values    pgtype.Float8Array
-				labelVals = model.GetCustomType(model.LabelValueArray)
-			)
-			err := rows.Scan(&labelIds, &times, &values, labelVals)
+		if tableSchema == schema.Data {
+			// If the query is for fetching samples.
+			results, err = appendSampleRows(results.([]seriesRow), rows)
+			rows.Close()
 			if err != nil {
-				panic(err)
+				rows.Close()
+				return nil, nil, err
 			}
-			fmt.Println(labelIds, times, values, labelVals)
+			continue
 		}
+		metricTable := metricTableNames[i]
+		seriesRows, err := appendExemplarRows(metricTable, rows)
+		if err != nil {
+			return nil, nil, fmt.Errorf("append exemplar rows: %w", err)
+		}
+		exemplarResults := results.([]exemplarSeriesRow)
+		exemplarResults = append(exemplarResults, seriesRows...)
+		results = exemplarResults
 		// Can't defer because we need to Close before the next loop iteration.
 		rows.Close()
 		if err != nil {
-			rows.Close()
 			return nil, nil, err
 		}
 	}
 
 	return results, nil, nil
+}
+
+func labelIdsMatch(a, b []int64) bool {
+	return fmt.Sprintf("%v", a) == fmt.Sprintf("%v", b)
 }
 
 // getMetricTableName gets the table name for a specific metric from internal
@@ -492,12 +529,12 @@ func (q *pgxQuerier) queryMetricTableName(metric, query string) (string, error) 
 
 // appendTsRows adds new results rows to already existing result rows and
 // returns the as a result.
-func appendSampleRows(out []sampleRow, in pgx.Rows) ([]sampleRow, error) {
+func appendSampleRows(out []seriesRow, in pgx.Rows) ([]seriesRow, error) {
 	if in.Err() != nil {
 		return out, in.Err()
 	}
 	for in.Next() {
-		var row sampleRow
+		var row seriesRow
 		row.err = in.Scan(&row.labelIds, &row.times, &row.values)
 		out = append(out, row)
 		if row.err != nil {
@@ -509,36 +546,50 @@ func appendSampleRows(out []sampleRow, in pgx.Rows) ([]sampleRow, error) {
 
 // appendExemplarRows adds new results rows to already existing result rows and
 // returns the as a result.
-func appendExemplarRows(out []exemplarRow, in pgx.Rows) (rows []exemplarRow, labelIds []int64, err error) {
+func appendExemplarRows(metricName string, in pgx.Rows) (rows []exemplarSeriesRow, err error) {
 	if in.Err() != nil {
-		return out, nil, in.Err()
+		return rows, in.Err()
 	}
-	var firstRowScanned bool
+	seriesRowMap := make(map[string]*exemplarSeriesRow)
+	// Note: The rows of multiple exemplar query, are such that `rows` here contains different series, represented by
+	// different label_ids array, that satisfy the given labels.
 	for in.Next() {
 		var (
-			err error
-			row exemplarRow
-			ids []int64
+			err      error
+			row      exemplarRow
+			labelIds []int64
 		)
-		if !firstRowScanned {
-			firstRowScanned = true
-			// Only scan labelIds for first row since all other rows will be the same.
-			err = in.Scan(&ids, &row.time, &row.value, &row.labelValues)
-			if err != nil {
-				return out, labelIds, fmt.Errorf("scan first exemplar row: %w", err)
-			}
-			out = append(out, row)
-			labelIds = ids
-			continue
-		}
 		err = in.Scan(&labelIds, &row.time, &row.value, &row.labelValues)
 		if err != nil {
 			log.Error("err", err)
-			return out, labelIds, err
+			return rows, err
 		}
-		out = append(out, row)
+
+		key := fmt.Sprintf("%s", labelIds)
+		if existingSeriesRow, exists := seriesRowMap[key]; exists {
+			existingSeriesRow.data = append(existingSeriesRow.data, row)
+			continue
+		}
+		// New exemplar series.
+		seriesRow := &exemplarSeriesRow{
+			metricName: metricName,
+			labelIds:   labelIds,
+			data:       make([]exemplarRow, 0, 1),
+		}
+		seriesRow.data = append(seriesRow.data, row)
+		seriesRowMap[key] = seriesRow
 	}
-	return out, labelIds, in.Err()
+	return getExemplarSeriesRows(seriesRowMap), in.Err()
+}
+
+func getExemplarSeriesRows(m map[string]*exemplarSeriesRow) []exemplarSeriesRow {
+	s := make([]exemplarSeriesRow, len(m))
+	i := 0
+	for _, v := range m {
+		s[i] = *v
+		i++
+	}
+	return s
 }
 
 // errorSeriesSet represents an error result in a form of a series set.

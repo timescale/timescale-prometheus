@@ -66,7 +66,7 @@ const (
 	WHERE m.series_id IN (%[3]s)
 	AND time >= '%[4]s'
 	AND time <= '%[5]s'
-	GROUP BY s.id, m.time, m.value, m.exemplar_label_values ORDER BY m.time`
+	GROUP BY s.id, m.time, m.value, m.exemplar_label_values`
 
 	/* SINGLE METRIC PATH (common, performance critical case) */
 	/* The simpler query (which isn't used):
@@ -300,7 +300,7 @@ func (c *clauseBuilder) Build(includeMetricName bool) ([]string, []interface{}, 
 	return c.clauses, c.args, nil
 }
 
-func buildTimeSeries(rows []sampleRow, lr lreader.LabelsReader) ([]*prompb.TimeSeries, error) {
+func buildTimeSeries(rows []seriesRow, lr lreader.LabelsReader) ([]*prompb.TimeSeries, error) {
 	results := make([]*prompb.TimeSeries, 0, len(rows))
 
 	for _, row := range rows {

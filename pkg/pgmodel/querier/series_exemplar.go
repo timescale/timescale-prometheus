@@ -24,7 +24,7 @@ const getExemplarLabelPositions = "SELECT * FROM " + schema.Catalog + ".get_exem
 // since if you want to make iterator, then you first need to scan and keep all results
 // in array of type A, and then use the cache (exemplar label values cache and labels cache)
 // to convert it to type B.
-func prepareExemplarQueryResult(conn pgxconn.PgxConn, lr lreader.LabelsReader, exemplarKeyPos cache.PositionCache, queryResult *exemplarResult) (model.ExemplarQueryResult, error) {
+func prepareExemplarQueryResult(conn pgxconn.PgxConn, lr lreader.LabelsReader, exemplarKeyPos cache.PositionCache, queryResult exemplarSeriesRow) (model.ExemplarQueryResult, error) {
 	var (
 		result   model.ExemplarQueryResult
 		metric   = queryResult.metricName

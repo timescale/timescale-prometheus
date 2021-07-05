@@ -26,7 +26,7 @@ const (
 // pgxSamplesSeriesSet implements storage.SeriesSet.
 type pgxSamplesSeriesSet struct {
 	rowIdx  int
-	rows    []sampleRow
+	rows    []seriesRow
 	err     error
 	querier labelQuerier
 }
@@ -34,7 +34,7 @@ type pgxSamplesSeriesSet struct {
 // pgxSamplesSeriesSet must implement storage.SeriesSet
 var _ storage.SeriesSet = (*pgxSamplesSeriesSet)(nil)
 
-func buildSeriesSet(rows []sampleRow, querier labelQuerier) storage.SeriesSet {
+func buildSeriesSet(rows []seriesRow, querier labelQuerier) storage.SeriesSet {
 	return &pgxSamplesSeriesSet{
 		rows:    rows,
 		querier: querier,
