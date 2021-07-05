@@ -176,6 +176,10 @@ func BuildSubQueries(matchers []*labels.Matcher) (*clauseBuilder, error) {
 	cb := &clauseBuilder{}
 
 	for _, m := range matchers {
+		if m == nil {
+			// When selectors supplied to PromQL parser does not parse due to errors in parser, it gives
+			// a nil matcher instead of an error. We catch this and complain for invalid matcher.
+		}
 		// From the PromQL docs: "Label matchers that match
 		// empty label values also select all time series that
 		// do not have the specific label set at all."
@@ -343,36 +347,44 @@ func BuildMetricNameSeriesIDQuery(cases []string) string {
 	return fmt.Sprintf(metricNameSeriesIDSQLFormat, strings.Join(cases, " AND "))
 }
 
-func buildTimeseriesBySeriesIDQuery(tableSchema string, filter metricTimeRangeFilter, series []pgmodel.SeriesID) (string, error) {
+type queryType uint8
+
+const (
+	seriesSamples queryType = iota
+	seriesExemplars
+)
+
+func getSchema(qt queryType) string {
+	switch qt {
+	case seriesSamples:
+		return schema.Data
+	case seriesExemplars:
+		return schema.Exemplar
+	default:
+		panic("invalid type")
+	}
+}
+
+func buildTimeseriesBySeriesIDQuery(qt queryType, filter metricTimeRangeFilter, series []pgmodel.SeriesID) (string, error) {
 	s := make([]string, 0, len(series))
 	for _, sID := range series {
 		s = append(s, fmt.Sprintf("%d", sID))
 	}
-	switch tableSchema {
-	case schema.Data:
-		return fmt.Sprintf(
-			timeseriesBySeriesIDsSQLFormat,
-			pgx.Identifier{tableSchema, filter.metric}.Sanitize(),
-			pgx.Identifier{seriesSchema, filter.metric}.Sanitize(),
-			strings.Join(s, ","),
-			filter.startTime,
-			filter.endTime,
-		), nil
-	case schema.Exemplar:
-		return fmt.Sprintf(
-			exemplarsBySeriesIDsSQLFormat,
-			pgx.Identifier{tableSchema, filter.metric}.Sanitize(),
-			pgx.Identifier{seriesSchema, filter.metric}.Sanitize(),
-			strings.Join(s, ","),
-			filter.startTime,
-			filter.endTime,
-		), nil
-	default:
-		return "", fmt.Errorf("invalid table schema")
+	baseQuery := timeseriesByMetricSQLFormat
+	if qt == seriesExemplars {
+		baseQuery = exemplarsBySeriesIDsSQLFormat
 	}
+	return fmt.Sprintf(
+		baseQuery,
+		pgx.Identifier{getSchema(qt), filter.metric}.Sanitize(),
+		pgx.Identifier{seriesSchema, filter.metric}.Sanitize(),
+		strings.Join(s, ","),
+		filter.startTime,
+		filter.endTime,
+	), nil
 }
 
-func buildTimeseriesByLabelClausesQuery(tableSchema string, filter metricTimeRangeFilter, cases []string, values []interface{},
+func buildTimeseriesByLabelClausesQuery(qt queryType, filter metricTimeRangeFilter, cases []string, values []interface{},
 	hints *storage.SelectHints, path []parser.Node) (string, []interface{}, parser.Node, error) {
 	qf, node, err := getAggregators(hints, path)
 	if err != nil {
@@ -387,10 +399,10 @@ func buildTimeseriesByLabelClausesQuery(tableSchema string, filter metricTimeRan
 	if err != nil {
 		return "", nil, nil, err
 	}
-	switch tableSchema {
-	case schema.Data:
+	switch qt {
+	case seriesSamples:
 		finalSQL := fmt.Sprintf(timeseriesByMetricSQLFormat,
-			pgx.Identifier{schema.Data, filter.metric}.Sanitize(),
+			pgx.Identifier{getSchema(seriesSamples), filter.metric}.Sanitize(),
 			pgx.Identifier{schema.DataSeries, filter.metric}.Sanitize(),
 			strings.Join(cases, " AND "),
 			filter.startTime,
@@ -399,9 +411,9 @@ func buildTimeseriesByLabelClausesQuery(tableSchema string, filter metricTimeRan
 			valueClauseBound,
 		)
 		return finalSQL, values, node, nil
-	case schema.Exemplar:
+	case seriesExemplars:
 		finalSQL := fmt.Sprintf(exemplarByMetricSQLFormat,
-			pgx.Identifier{tableSchema, filter.metric}.Sanitize(),
+			pgx.Identifier{getSchema(qt), filter.metric}.Sanitize(),
 			pgx.Identifier{seriesSchema, filter.metric}.Sanitize(),
 			strings.Join(cases, " AND "),
 			filter.startTime,

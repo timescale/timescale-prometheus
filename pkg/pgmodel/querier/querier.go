@@ -12,13 +12,10 @@ import (
 
 	"github.com/jackc/pgconn"
 	"github.com/jackc/pgerrcode"
-	"github.com/jackc/pgtype"
-	"github.com/jackc/pgx/v4"
 	"github.com/prometheus/prometheus/pkg/labels"
 	"github.com/prometheus/prometheus/pkg/timestamp"
 	"github.com/prometheus/prometheus/promql/parser"
 	"github.com/prometheus/prometheus/storage"
-	"github.com/timescale/promscale/pkg/log"
 	"github.com/timescale/promscale/pkg/pgmodel/cache"
 	"github.com/timescale/promscale/pkg/pgmodel/common/errors"
 	"github.com/timescale/promscale/pkg/pgmodel/common/schema"
@@ -28,29 +25,6 @@ import (
 	"github.com/timescale/promscale/pkg/prompb"
 	"github.com/timescale/promscale/pkg/tenancy"
 )
-
-// Reader reads the data based on the provided read request.
-type Reader interface {
-	Read(*prompb.ReadRequest) (*prompb.ReadResponse, error)
-}
-
-// Querier queries the data using the provided query data and returns the
-// matching timeseries.
-type Querier interface {
-	// Query returns resulting timeseries for a query.
-	Query(*prompb.Query) ([]*prompb.TimeSeries, error)
-	// Select returns a series set containing the samples that matches the supplied query parameters.
-	Select(mint, maxt int64, sortSeries bool, hints *storage.SelectHints, path []parser.Node, ms ...*labels.Matcher) (storage.SeriesSet, parser.Node)
-	// Exemplar returns a exemplar querier.
-	Exemplar(ctx context.Context) ExemplarQuerier
-}
-
-// ExemplarQuerier queries data using the provided query data and returns the
-// matching exemplars.
-type ExemplarQuerier interface {
-	// Select returns a series set containing the exemplar that matches the supplied query parameters.
-	Select(start, end time.Time, ms ...[]*labels.Matcher) ([]model.ExemplarQueryResult, error)
-}
 
 const (
 	getSampleMetricTableSQL   = "SELECT table_name FROM " + schema.Catalog + ".get_metric_table_name_if_exists($1)"
@@ -94,7 +68,7 @@ var _ Querier = (*pgxQuerier)(nil)
 
 // Select implements the Querier interface.
 func (q *pgxQuerier) Select(mint, maxt int64, _ bool, hints *storage.SelectHints, path []parser.Node, ms ...*labels.Matcher) (storage.SeriesSet, parser.Node) {
-	rows, topNode, err := q.getResultRows(schema.Data, mint, maxt, hints, path, ms)
+	rows, topNode, err := q.getResultRows(seriesSamples, mint, maxt, hints, path, ms)
 	if err != nil {
 		return errorSeriesSet{err: err}, nil
 	}
@@ -104,34 +78,25 @@ func (q *pgxQuerier) Select(mint, maxt int64, _ bool, hints *storage.SelectHints
 }
 
 func (q *pgxQuerier) Exemplar(ctx context.Context) ExemplarQuerier {
-	return newExemplarQuerier(ctx, q.conn, q, q.metricTableNames, q.exemplarPosCache, q.rAuth)
+	return newExemplarQuerier(ctx, q, q.exemplarPosCache)
 }
 
 type pgxExemplarQuerier struct {
-	conn                pgxconn.PgxConn
+	pgxRef              *pgxQuerier // We need a reference to pgxQuerier to reuse the existing values and functions.
 	ctx                 context.Context
-	metricTableCache    cache.MetricCache
 	exemplarKeyPosCache cache.PositionCache
-	rAuth               tenancy.ReadAuthorizer
-	pgx                 *pgxQuerier // We need a reference to pgxQuerier to reuse the existing functions.
 }
 
 // newExemplarQuerier returns a querier that can query over exemplars.
 func newExemplarQuerier(
 	ctx context.Context,
-	conn pgxconn.PgxConn,
-	pgx *pgxQuerier,
-	metricCache cache.MetricCache,
+	pgxRef *pgxQuerier,
 	exemplarCache cache.PositionCache,
-	rAuth tenancy.ReadAuthorizer,
 ) ExemplarQuerier {
 	return &pgxExemplarQuerier{
 		ctx:                 ctx,
-		conn:                conn,
-		pgx:                 pgx,
-		metricTableCache:    metricCache,
+		pgxRef:              pgxRef,
 		exemplarKeyPosCache: exemplarCache,
-		rAuth:               rAuth,
 	}
 }
 
@@ -142,8 +107,8 @@ func (eq *pgxExemplarQuerier) Select(start, end time.Time, matchersList ...[]*la
 		rowsCh      = make(chan interface{}, numMatchers)
 	)
 	for _, matchers := range matchersList {
-		go func(m []*labels.Matcher) {
-			rows, _, err := eq.pgx.getResultRows(schema.Exemplar, timestamp.FromTime(start), timestamp.FromTime(end), nil, nil, m)
+		go func(matchers []*labels.Matcher) {
+			rows, _, err := eq.pgxRef.getResultRows(seriesExemplars, timestamp.FromTime(start), timestamp.FromTime(end), nil, nil, matchers)
 			if rows == nil {
 				// Result does not exists.
 				rowsCh <- nil
@@ -171,7 +136,7 @@ func (eq *pgxExemplarQuerier) Select(start, end time.Time, matchersList ...[]*la
 			if !shouldProceed() {
 				continue
 			}
-			exemplars, prepareErr := prepareExemplarQueryResult(eq.conn, eq.pgx.labelsReader, eq.exemplarKeyPosCache, out)
+			exemplars, prepareErr := prepareExemplarQueryResult(eq.pgxRef.conn, eq.pgxRef.labelsReader, eq.exemplarKeyPosCache, out)
 			if prepareErr != nil {
 				err = prepareErr
 				continue
@@ -182,7 +147,7 @@ func (eq *pgxExemplarQuerier) Select(start, end time.Time, matchersList ...[]*la
 				continue
 			}
 			for _, seriesRow := range out {
-				exemplars, prepareErr := prepareExemplarQueryResult(eq.conn, eq.pgx.labelsReader, eq.exemplarKeyPosCache, seriesRow)
+				exemplars, prepareErr := prepareExemplarQueryResult(eq.pgxRef.conn, eq.pgxRef.labelsReader, eq.exemplarKeyPosCache, seriesRow)
 				if prepareErr != nil {
 					err = prepareErr
 					continue
@@ -195,10 +160,11 @@ func (eq *pgxExemplarQuerier) Select(start, end time.Time, matchersList ...[]*la
 			}
 			err = out // Only capture the first error.
 		case nil:
+			// No result.
 		}
 	}
 	if err != nil {
-		return results, fmt.Errorf("selecting exemplars: %w", err)
+		return nil, fmt.Errorf("selecting exemplars: %w", err)
 	}
 	sort.Slice(results, func(i, j int) bool {
 		return labels.Compare(results[i].SeriesLabels, results[j].SeriesLabels) < 0
@@ -218,7 +184,7 @@ func (q *pgxQuerier) Query(query *prompb.Query) ([]*prompb.TimeSeries, error) {
 		return nil, err
 	}
 
-	rows, _, err := q.getResultRows(schema.Data, query.StartTimestampMs, query.EndTimestampMs, nil, nil, matchers)
+	rows, _, err := q.getResultRows(seriesSamples, query.StartTimestampMs, query.EndTimestampMs, nil, nil, matchers)
 	if err != nil {
 		return nil, err
 	}
@@ -253,28 +219,9 @@ func fromLabelMatchers(matchers []*prompb.LabelMatcher) ([]*labels.Matcher, erro
 	return result, nil
 }
 
-type seriesRow struct {
-	labelIds []int64
-	times    pgtype.TimestamptzArray
-	values   pgtype.Float8Array
-	err      error
-}
-
-type exemplarSeriesRow struct {
-	metricName string
-	labelIds   []int64
-	data       []exemplarRow
-}
-
-type exemplarRow struct {
-	time        time.Time
-	value       float64
-	labelValues []string // Exemplar label values.
-}
-
 // getResultRows fetches the result row datasets from the database using the
 // supplied query parameters.
-func (q *pgxQuerier) getResultRows(tableSchema string, startTimestamp int64, endTimestamp int64, hints *storage.SelectHints, path []parser.Node, matchers []*labels.Matcher) (interface{}, parser.Node, error) {
+func (q *pgxQuerier) getResultRows(qt queryType, startTimestamp int64, endTimestamp int64, hints *storage.SelectHints, path []parser.Node, matchers []*labels.Matcher) (interface{}, parser.Node, error) {
 	if q.rAuth != nil {
 		matchers = q.rAuth.AppendTenantMatcher(matchers)
 	}
@@ -298,21 +245,21 @@ func (q *pgxQuerier) getResultRows(tableSchema string, startTimestamp int64, end
 		if err != nil {
 			return nil, nil, err
 		}
-		return q.querySingleMetric(tableSchema, metric, filter, clauses, values, hints, path)
+		return q.querySingleMetric(qt, metric, filter, clauses, values, hints, path)
 	}
 
 	clauses, values, err := builder.Build(true)
 	if err != nil {
 		return nil, nil, err
 	}
-	return q.queryMultipleMetrics(tableSchema, filter, clauses, values)
+	return q.queryMultipleMetrics(qt, filter, clauses, values)
 }
 
 // querySingleMetric returns all the result rows for a single metric using the
 // supplied query parameters. It uses the hints and node path to try to push
 // down query functions where possible.
-func (q *pgxQuerier) querySingleMetric(tableSchema, metric string, filter metricTimeRangeFilter, cases []string, values []interface{}, hints *storage.SelectHints, path []parser.Node) (interface{}, parser.Node, error) {
-	tableName, err := q.getMetricTableName(metric, tableSchema)
+func (q *pgxQuerier) querySingleMetric(qt queryType, metric string, filter metricTimeRangeFilter, cases []string, values []interface{}, hints *storage.SelectHints, path []parser.Node) (interface{}, parser.Node, error) {
+	tableName, err := q.getMetricTableName(metric, getSchema(qt))
 	if err != nil {
 		// If the metric table is missing, there are no results for this query.
 		if err == errors.ErrMissingTableName {
@@ -323,7 +270,7 @@ func (q *pgxQuerier) querySingleMetric(tableSchema, metric string, filter metric
 	}
 	filter.metric = tableName
 
-	sqlQuery, values, topNode, err := buildTimeseriesByLabelClausesQuery(tableSchema, filter, cases, values, hints, path)
+	sqlQuery, values, topNode, err := buildTimeseriesByLabelClausesQuery(qt, filter, cases, values, hints, path)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -341,14 +288,14 @@ func (q *pgxQuerier) querySingleMetric(tableSchema, metric string, filter metric
 	defer rows.Close()
 
 	// TODO this allocation assumes we usually have 1 row, if not, refactor
-	switch tableSchema {
-	case schema.Data:
+	switch qt {
+	case seriesSamples:
 		samplesRows, err := appendSampleRows(make([]seriesRow, 0, 1), rows)
 		if err != nil {
 			return nil, topNode, fmt.Errorf("appending sample rows: %w", err)
 		}
 		return samplesRows, topNode, nil
-	case schema.Exemplar:
+	case seriesExemplars:
 		exemplarSeriesRows, err := appendExemplarRows(metric, rows)
 		if err != nil {
 			return nil, topNode, fmt.Errorf("appending exemplar rows: %w", err)
@@ -361,7 +308,7 @@ func (q *pgxQuerier) querySingleMetric(tableSchema, metric string, filter metric
 
 // queryMultipleMetrics returns all the result rows for across multiple metrics
 // using the supplied query parameters.
-func (q *pgxQuerier) queryMultipleMetrics(tableSchema string, filter metricTimeRangeFilter, cases []string, values []interface{}) (interface{}, parser.Node, error) {
+func (q *pgxQuerier) queryMultipleMetrics(qt queryType, filter metricTimeRangeFilter, cases []string, values []interface{}) (interface{}, parser.Node, error) {
 	// First fetch series IDs per metric.
 	sqlQuery := BuildMetricNameSeriesIDQuery(cases)
 	rows, err := q.conn.Query(context.Background(), sqlQuery, values...)
@@ -380,10 +327,10 @@ func (q *pgxQuerier) queryMultipleMetrics(tableSchema string, filter metricTimeR
 		results          interface{}
 		metricTableNames = make([]string, 0, len(metrics)) // This will be required to fill the `metricName` field of exemplarResult.
 	)
-	switch tableSchema {
-	case schema.Data:
+	switch qt {
+	case seriesSamples:
 		results = make([]seriesRow, 0, len(metrics))
-	case schema.Exemplar:
+	case seriesExemplars:
 		results = make([]exemplarSeriesRow, 0, len(metrics))
 	default:
 		panic("invalid type")
@@ -395,7 +342,7 @@ func (q *pgxQuerier) queryMultipleMetrics(tableSchema string, filter metricTimeR
 	// Generate queries for each metric and send them in a single batch.
 	for i, metric := range metrics {
 		//TODO batch getMetricTableName
-		tableName, err := q.getMetricTableName(metric, tableSchema)
+		tableName, err := q.getMetricTableName(metric, getSchema(qt))
 		if err != nil {
 			// If the metric table is missing, there are no results for this query.
 			if err == errors.ErrMissingTableName {
@@ -404,8 +351,7 @@ func (q *pgxQuerier) queryMultipleMetrics(tableSchema string, filter metricTimeR
 			return nil, nil, err
 		}
 		filter.metric = tableName
-		sqlQuery, err := buildTimeseriesBySeriesIDQuery(tableSchema, filter, series[i])
-		fmt.Println(sqlQuery)
+		sqlQuery, err := buildTimeseriesBySeriesIDQuery(qt, filter, series[i])
 		if err != nil {
 			return nil, nil, fmt.Errorf("build timeseries by series-id: %w", err)
 		}
@@ -427,7 +373,7 @@ func (q *pgxQuerier) queryMultipleMetrics(tableSchema string, filter metricTimeR
 			return nil, nil, err
 		}
 		// Append all rows into results.
-		if tableSchema == schema.Data {
+		if qt == seriesSamples {
 			// If the query is for fetching samples.
 			results, err = appendSampleRows(results.([]seriesRow), rows)
 			rows.Close()
@@ -453,10 +399,6 @@ func (q *pgxQuerier) queryMultipleMetrics(tableSchema string, filter metricTimeR
 	}
 
 	return results, nil, nil
-}
-
-func labelIdsMatch(a, b []int64) bool {
-	return fmt.Sprintf("%v", a) == fmt.Sprintf("%v", b)
 }
 
 // getMetricTableName gets the table name for a specific metric from internal
@@ -525,71 +467,6 @@ func (q *pgxQuerier) queryMetricTableName(metric, query string) (string, error) 
 	}
 
 	return tableName, nil
-}
-
-// appendTsRows adds new results rows to already existing result rows and
-// returns the as a result.
-func appendSampleRows(out []seriesRow, in pgx.Rows) ([]seriesRow, error) {
-	if in.Err() != nil {
-		return out, in.Err()
-	}
-	for in.Next() {
-		var row seriesRow
-		row.err = in.Scan(&row.labelIds, &row.times, &row.values)
-		out = append(out, row)
-		if row.err != nil {
-			return out, row.err
-		}
-	}
-	return out, in.Err()
-}
-
-// appendExemplarRows adds new results rows to already existing result rows and
-// returns the as a result.
-func appendExemplarRows(metricName string, in pgx.Rows) (rows []exemplarSeriesRow, err error) {
-	if in.Err() != nil {
-		return rows, in.Err()
-	}
-	seriesRowMap := make(map[string]*exemplarSeriesRow)
-	// Note: The rows of multiple exemplar query, are such that `rows` here contains different series, represented by
-	// different label_ids array, that satisfy the given labels.
-	for in.Next() {
-		var (
-			err      error
-			row      exemplarRow
-			labelIds []int64
-		)
-		err = in.Scan(&labelIds, &row.time, &row.value, &row.labelValues)
-		if err != nil {
-			log.Error("err", err)
-			return rows, err
-		}
-
-		key := fmt.Sprintf("%s", labelIds)
-		if existingSeriesRow, exists := seriesRowMap[key]; exists {
-			existingSeriesRow.data = append(existingSeriesRow.data, row)
-			continue
-		}
-		// New exemplar series.
-		seriesRow := &exemplarSeriesRow{
-			metricName: metricName,
-			labelIds:   labelIds,
-			data:       make([]exemplarRow, 0, 1),
-		}
-		seriesRow.data = append(seriesRow.data, row)
-		seriesRowMap[key] = seriesRow
-	}
-	return getExemplarSeriesRows(seriesRowMap), in.Err()
-}
-
-func getExemplarSeriesRows(m map[string]*exemplarSeriesRow) []exemplarSeriesRow {
-	s := make([]exemplarSeriesRow, len(m))
-	i := 0
-	for _, v := range m {
-		s[i] = *v
-		i++
-	}
-	return s
 }
 
 // errorSeriesSet represents an error result in a form of a series set.
