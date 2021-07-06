@@ -44,7 +44,7 @@ func TestMetricTableNameCache(t *testing.T) {
 				Metrics: clockcache.WithMax(100),
 			}
 
-			missing, err := cache.Get(c.metric)
+			missing, err := cache.Get(c.metric, false)
 
 			if missing != "" {
 				t.Fatal("found cache that should be missing, not stored yet")
@@ -54,13 +54,13 @@ func TestMetricTableNameCache(t *testing.T) {
 				t.Fatalf("got unexpected error:\ngot\n%s\nwanted\n%s\n", err, errors.ErrEntryNotFound)
 			}
 
-			err = cache.Set(c.metric, c.tableName)
+			err = cache.Set(c.metric, c.tableName, false)
 
 			if err != nil {
 				t.Fatalf("got unexpected error:\ngot\n%s\nwanted\nnil\n", err)
 			}
 
-			found, err := cache.Get(c.metric)
+			found, err := cache.Get(c.metric, false)
 
 			if found != c.tableName {
 				t.Fatalf("found wrong cache value: got %s wanted %s", found, c.tableName)
@@ -70,5 +70,48 @@ func TestMetricTableNameCache(t *testing.T) {
 				t.Fatalf("got unexpected error:\ngot\n%s\nwanted\nnil\n", err)
 			}
 		})
+	}
+}
+
+func TestMetricNameCacheExemplarEntry(t *testing.T) {
+	metric, table := "test_metric", "test_table"
+	cache := NewMetricCache(Config{MetricsCacheSize: 2})
+	_, found := cache.Get(metric, false)
+	if found != errors.ErrEntryNotFound {
+		t.Fatal("entry found for non inserted data")
+	}
+	err := cache.Set(metric, table, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	val, err := cache.Get(metric, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if val != table {
+		t.Fatalf("metric entry does not match table entry")
+	}
+	val, err = cache.Get(metric, true)
+	if err != errors.ErrEntryNotFound {
+		t.Fatalf("exemplar metric not set, but still exists")
+	}
+	err = cache.Set(metric, table, true)
+	if err != nil {
+		t.Fatalf(err.Error())
+	}
+	// Should have entry both for exemplar metric and sample metric.
+	val, err = cache.Get(metric, true)
+	if err != nil {
+		t.Fatalf(err.Error())
+	}
+	if val != table {
+		t.Fatalf("does not match")
+	}
+	val, err = cache.Get(metric, false)
+	if err != nil {
+		t.Fatalf(err.Error())
+	}
+	if val != table {
+		t.Fatalf("does not match")
 	}
 }

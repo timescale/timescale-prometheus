@@ -49,7 +49,7 @@ func NewInsertable(series *Series, data interface{}) Insertable {
 	case []prompb.Exemplar:
 		return newExemplarSamples(series, n)
 	default:
-		panic("invalid insertableType")
+		panic(fmt.Sprintf("invalid insertableType: %T", data))
 	}
 }
 

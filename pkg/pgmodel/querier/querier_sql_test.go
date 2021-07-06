@@ -5,6 +5,7 @@ package querier
 
 import (
 	"fmt"
+	"github.com/prometheus/prometheus/pkg/timestamp"
 	"reflect"
 	"testing"
 	"time"
@@ -229,7 +230,7 @@ func TestPGXQuerierQuery(t *testing.T) {
 			result: []*prompb.TimeSeries{
 				{
 					Labels:  []prompb.Label{{Name: model.MetricNameLabelName, Value: "foo"}},
-					Samples: []prompb.Sample{{Timestamp: toMilis(time.Unix(0, 0)), Value: 1}},
+					Samples: []prompb.Sample{{Timestamp: timestamp.FromTime(time.Unix(0, 0)), Value: 1}},
 				},
 			},
 			sqlQueries: []model.SqlQuery{
@@ -284,7 +285,7 @@ func TestPGXQuerierQuery(t *testing.T) {
 			result: []*prompb.TimeSeries{
 				{
 					Labels:  []prompb.Label{{Name: model.MetricNameLabelName, Value: "bar"}},
-					Samples: []prompb.Sample{{Timestamp: toMilis(time.Unix(0, 0)), Value: 1}},
+					Samples: []prompb.Sample{{Timestamp: timestamp.FromTime(time.Unix(0, 0)), Value: 1}},
 				},
 			},
 			sqlQueries: []model.SqlQuery{
@@ -334,11 +335,11 @@ func TestPGXQuerierQuery(t *testing.T) {
 			result: []*prompb.TimeSeries{
 				{
 					Labels:  []prompb.Label{{Name: model.MetricNameLabelName, Value: "foo"}},
-					Samples: []prompb.Sample{{Timestamp: toMilis(time.Unix(0, 0)), Value: 1}},
+					Samples: []prompb.Sample{{Timestamp: timestamp.FromTime(time.Unix(0, 0)), Value: 1}},
 				},
 				{
 					Labels:  []prompb.Label{{Name: model.MetricNameLabelName, Value: "bar"}},
-					Samples: []prompb.Sample{{Timestamp: toMilis(time.Unix(0, 0)), Value: 1}},
+					Samples: []prompb.Sample{{Timestamp: timestamp.FromTime(time.Unix(0, 0)), Value: 1}},
 				},
 			},
 			sqlQueries: []model.SqlQuery{
@@ -447,7 +448,7 @@ func TestPGXQuerierQuery(t *testing.T) {
 			result: []*prompb.TimeSeries{
 				{
 					Labels:  []prompb.Label{{Name: "foo", Value: "bar"}},
-					Samples: []prompb.Sample{{Timestamp: toMilis(time.Unix(0, 0)), Value: 1}},
+					Samples: []prompb.Sample{{Timestamp: timestamp.FromTime(time.Unix(0, 0)), Value: 1}},
 				},
 			},
 			sqlQueries: []model.SqlQuery{
@@ -508,7 +509,7 @@ func TestPGXQuerierQuery(t *testing.T) {
 						{Name: "foo", Value: "bar"},
 						{Name: "foo2", Value: "bar2"},
 					},
-					Samples: []prompb.Sample{{Timestamp: toMilis(time.Unix(0, 0)), Value: 1}},
+					Samples: []prompb.Sample{{Timestamp: timestamp.FromTime(time.Unix(0, 0)), Value: 1}},
 				},
 			},
 			sqlQueries: []model.SqlQuery{
@@ -568,7 +569,7 @@ func TestPGXQuerierQuery(t *testing.T) {
 					Labels: []prompb.Label{
 						{Name: "foo2", Value: "bar2"},
 					},
-					Samples: []prompb.Sample{{Timestamp: toMilis(time.Unix(0, 0)), Value: 1}},
+					Samples: []prompb.Sample{{Timestamp: timestamp.FromTime(time.Unix(0, 0)), Value: 1}},
 				},
 			},
 			sqlQueries: []model.SqlQuery{

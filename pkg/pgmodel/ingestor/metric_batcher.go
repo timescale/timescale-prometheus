@@ -214,30 +214,29 @@ func (h *metricBatcher) processExemplars(data []model.Insertable) error {
 		// We are seeing the exemplar belonging to this metric first time. It may be the
 		// first time of this exemplar in the database. So, let's attempt to create a table
 		// if it does not exists.
-		var created bool
+		var created bool // Trivial. Should we remove the scan?
 		err := h.conn.QueryRow(context.Background(), createExemplarTable, h.metricName).Scan(&created)
 		if err != nil {
 			return fmt.Errorf("checking exemplar table creation: %w", err)
 		}
 	}
-	err := h.orderExemplarLabelValues(data)
+	err := orderExemplarLabelValues(h.conn, h.exemplarCatalog, data)
 	if err != nil {
 		return fmt.Errorf("metric-batcher: ordering exemplar label values: %w", err)
 	}
 	return nil
 }
 
-// todo: make this a function only!
-func (h *metricBatcher) orderExemplarLabelValues(data []model.Insertable) error {
+func orderExemplarLabelValues(conn pgxconn.PgxConn, info *exemplarInfo, data []model.Insertable) error {
 	var (
-		batch          = h.conn.NewBatch() // todo: make this a pool
+		batch          pgxconn.PgxBatch
 		pendingIndexes []int
 	)
 
 	for i := range data {
 		row := data[i]
 		if row.Type() == model.Exemplar {
-			labelKeyIndex, entryExists := h.exemplarCatalog.exemplarCache.GetLabelPositions(row.GetSeries().MetricName())
+			labelKeyIndex, entryExists := info.exemplarCache.GetLabelPositions(row.GetSeries().MetricName())
 			needsFetch := true
 			if entryExists {
 				if positionExists := row.OrderExemplarLabels(labelKeyIndex); positionExists {
@@ -245,6 +244,10 @@ func (h *metricBatcher) orderExemplarLabelValues(data []model.Insertable) error 
 				}
 			}
 			if needsFetch {
+				if batch == nil {
+					// Allocate a batch only if required. If the cache does the job, why to waste on allocs.
+					batch = conn.NewBatch()
+				}
 				batch.Queue(getExemplarLabelPositions, row.GetSeries().MetricName(), row.AllExemplarLabelKeys())
 				pendingIndexes = append(pendingIndexes, i)
 			}
@@ -254,7 +257,7 @@ func (h *metricBatcher) orderExemplarLabelValues(data []model.Insertable) error 
 		// There are positions that require to be fetched. Let's fetch them and fill our indexes.
 		// pendingIndexes contain the exact array index for rows, where the cache miss were found. Let's
 		// use the pendingIndexes to go to those rows and order the labels in exemplars quickly.
-		results, err := h.conn.SendBatch(context.Background(), batch)
+		results, err := conn.SendBatch(context.Background(), batch)
 		if err != nil {
 			return fmt.Errorf("sending fetch label key positions batch: %w", err)
 		}
@@ -268,7 +271,7 @@ func (h *metricBatcher) orderExemplarLabelValues(data []model.Insertable) error 
 			if err != nil {
 				return fmt.Errorf("fetching label key positions: %w", err)
 			}
-			h.exemplarCatalog.exemplarCache.SetorUpdateLabelPositions(metricName, labelKeyIndex)
+			info.exemplarCache.SetorUpdateLabelPositions(metricName, labelKeyIndex)
 			row := data[index]
 			row.OrderExemplarLabels(labelKeyIndex) // We just filled the position, so no need to check if it exists or not.
 		}
