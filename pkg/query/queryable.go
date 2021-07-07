@@ -38,7 +38,7 @@ func (q queryable) Samples(ctx context.Context, mint, maxt int64) (promql.Sample
 
 // todo: optimize this (remove need for querier)
 func (q queryable) Exemplar(ctx context.Context) promql.ExemplarQuerier {
-	return q.newQuerier(nil, 0, 0).metricsReader.Exemplar(ctx)
+	return q.newQuerier(context.TODO(), 0, 0).metricsReader.Exemplar(ctx)
 }
 
 type querier struct {

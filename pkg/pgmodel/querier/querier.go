@@ -275,7 +275,6 @@ func (q *pgxQuerier) querySingleMetric(qt queryType, metric string, filter metri
 		return nil, nil, err
 	}
 
-	fmt.Println("sqlQuery", sqlQuery, values)
 	rows, err := q.conn.Query(context.Background(), sqlQuery, values...)
 	if err != nil {
 		// If we are getting undefined table error, it means the query

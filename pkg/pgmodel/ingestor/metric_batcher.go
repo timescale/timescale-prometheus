@@ -7,6 +7,7 @@ package ingestor
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/prometheus/prometheus/pkg/labels"
 	"github.com/timescale/promscale/pkg/pgmodel/cache"
@@ -229,8 +230,9 @@ func (h *metricBatcher) processExemplars(data []model.Insertable) error {
 
 func orderExemplarLabelValues(conn pgxconn.PgxConn, info *exemplarInfo, data []model.Insertable) error {
 	var (
-		batch          pgxconn.PgxBatch
-		pendingIndexes []int
+		batch                pgxconn.PgxBatch
+		pendingIndexes       []int
+		emptyLabelSetIndexes []bool // Exemplars can have empty label sets. Hence, skip result scan for such cases.
 	)
 
 	for i := range data {
@@ -250,6 +252,7 @@ func orderExemplarLabelValues(conn pgxconn.PgxConn, info *exemplarInfo, data []m
 				}
 				batch.Queue(getExemplarLabelPositions, row.GetSeries().MetricName(), row.AllExemplarLabelKeys())
 				pendingIndexes = append(pendingIndexes, i)
+				emptyLabelSetIndexes = append(emptyLabelSetIndexes, len(row.AllExemplarLabelKeys()) == 0)
 			}
 		}
 	}
@@ -262,13 +265,18 @@ func orderExemplarLabelValues(conn pgxconn.PgxConn, info *exemplarInfo, data []m
 			return fmt.Errorf("sending fetch label key positions batch: %w", err)
 		}
 		defer results.Close()
-		for _, index := range pendingIndexes {
+		for i, index := range pendingIndexes {
 			var (
-				metricName    string
-				labelKeyIndex map[string]int
+				metricName      string
+				labelKeyIndex   map[string]int
+				isEmptyLabelSet = emptyLabelSetIndexes[i]
 			)
 			err := results.QueryRow().Scan(&metricName, &labelKeyIndex)
 			if err != nil {
+				if isEmptyLabelSet && strings.Contains(err.Error(), "no rows in result set") {
+					// Labels set of exemplar empty. Hence, we do not expect any rows while scanning the output.
+					continue
+				}
 				return fmt.Errorf("fetching label key positions: %w", err)
 			}
 			info.exemplarCache.SetorUpdateLabelPositions(metricName, labelKeyIndex)

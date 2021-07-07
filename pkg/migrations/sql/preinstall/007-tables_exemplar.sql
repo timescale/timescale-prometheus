@@ -13,4 +13,6 @@ CREATE TABLE IF NOT EXISTS SCHEMA_CATALOG.exemplar (
     metric_name TEXT NOT NULL,
     table_name  TEXT NOT NULL
 );
+GRANT SELECT ON TABLE SCHEMA_CATALOG.exemplar TO prom_reader;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE SCHEMA_CATALOG.exemplar TO prom_writer;
 -- todo: create indexes
