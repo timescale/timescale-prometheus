@@ -366,7 +366,7 @@ func buildTimeseriesBySeriesIDQuery(qt queryType, filter metricTimeRangeFilter, 
 	for _, sID := range series {
 		s = append(s, fmt.Sprintf("%d", sID))
 	}
-	baseQuery := timeseriesByMetricSQLFormat
+	baseQuery := timeseriesBySeriesIDsSQLFormat
 	if qt == seriesExemplars {
 		baseQuery = exemplarsBySeriesIDsSQLFormat
 	}

@@ -92,7 +92,7 @@ func TestMetricNameCacheExemplarEntry(t *testing.T) {
 	if val != table {
 		t.Fatalf("metric entry does not match table entry")
 	}
-	val, err = cache.Get(metric, true)
+	_, err = cache.Get(metric, true)
 	if err != errors.ErrEntryNotFound {
 		t.Fatalf("exemplar metric not set, but still exists")
 	}
