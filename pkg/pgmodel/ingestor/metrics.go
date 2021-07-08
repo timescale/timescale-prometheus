@@ -38,6 +38,22 @@ var (
 		},
 	)
 
+	numSamplesInserted = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Namespace: util.PromNamespace,
+			Name:      "sent_samples_total",
+			Help:      "Total samples sent by copiers to the database.",
+		},
+	)
+
+	numExemplarsInserted = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Namespace: util.PromNamespace,
+			Name:      "sent_exemplars_total",
+			Help:      "Total exemplars sent by copiers to the database.",
+		},
+	)
+
 	NumInsertsPerBatch = prometheus.NewHistogram(
 		prometheus.HistogramOpts{
 			Namespace: util.PromNamespace,
@@ -46,6 +62,7 @@ var (
 			Buckets:   util.HistogramBucketsSaturating(1, 2, maxCopyRequestsPerTxn),
 		},
 	)
+
 	NumRowsPerBatch = prometheus.NewHistogram(
 		prometheus.HistogramOpts{
 			Namespace: util.PromNamespace,
@@ -54,6 +71,7 @@ var (
 			Buckets:   prometheus.ExponentialBuckets(1, 2, 15),
 		},
 	)
+
 	NumRowsPerInsert = prometheus.NewHistogram(
 		prometheus.HistogramOpts{
 			Namespace: util.PromNamespace,
@@ -62,6 +80,7 @@ var (
 			Buckets:   prometheus.ExponentialBuckets(1, 2, 13),
 		},
 	)
+
 	DbBatchInsertDuration = prometheus.NewHistogram(
 		prometheus.HistogramOpts{
 			Namespace: util.PromNamespace,
@@ -103,6 +122,8 @@ func init() {
 		MetricBatcherChCap,
 		MetricBatcherChLen,
 		MetricBatcherFlushSeries,
+		numSamplesInserted,
+		numExemplarsInserted,
 		NumInsertsPerBatch,
 		NumRowsPerBatch,
 		NumRowsPerInsert,

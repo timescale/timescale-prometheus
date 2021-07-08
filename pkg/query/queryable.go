@@ -27,8 +27,8 @@ type queryable struct {
 func (q queryable) newQuerier(ctx context.Context, mint, maxt int64) *querier {
 	return &querier{
 		ctx: ctx, mint: mint, maxt: maxt,
-		metricsReader: q.querier,
-		labelsReader:  q.labelsReader,
+		metrics:      q.querier,
+		labelsReader: q.labelsReader,
 	}
 }
 
@@ -36,16 +36,15 @@ func (q queryable) Samples(ctx context.Context, mint, maxt int64) (promql.Sample
 	return q.newQuerier(ctx, mint, maxt), nil
 }
 
-// todo: optimize this (remove need for querier)
 func (q queryable) Exemplar(ctx context.Context) promql.ExemplarQuerier {
-	return q.newQuerier(context.TODO(), 0, 0).metricsReader.Exemplar(ctx)
+	return q.newQuerier(ctx, 0, 0).Exemplar(ctx)
 }
 
 type querier struct {
-	ctx           context.Context
-	mint, maxt    int64
-	metricsReader pgQuerier.Querier
-	labelsReader  lreader.LabelsReader
+	ctx          context.Context
+	mint, maxt   int64
+	metrics      pgQuerier.Querier
+	labelsReader lreader.LabelsReader
 }
 
 func (q querier) LabelValues(name string) ([]string, storage.Warnings, error) {
@@ -63,5 +62,9 @@ func (q querier) Close() error {
 }
 
 func (q querier) Select(sortSeries bool, hints *storage.SelectHints, path []parser.Node, matchers ...*labels.Matcher) (storage.SeriesSet, parser.Node) {
-	return q.metricsReader.Select(q.mint, q.maxt, sortSeries, hints, path, matchers...)
+	return q.metrics.Select(q.mint, q.maxt, sortSeries, hints, path, matchers...)
+}
+
+func (q querier) Exemplar(ctx context.Context) promql.ExemplarQuerier {
+	return q.metrics.Exemplar(ctx)
 }

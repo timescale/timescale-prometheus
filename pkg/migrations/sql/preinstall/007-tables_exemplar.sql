@@ -4,9 +4,15 @@ CREATE TABLE IF NOT EXISTS SCHEMA_CATALOG.exemplar_label_key_position (
     pos         INTEGER NOT NULL,
     PRIMARY KEY (metric_name, key)
 );
--- todo: create indexes.
 GRANT SELECT ON TABLE SCHEMA_CATALOG.exemplar_label_key_position TO prom_reader;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE SCHEMA_CATALOG.exemplar_label_key_position TO prom_writer;
+
+CREATE INDEX IF NOT EXISTS SCHEMA_CATALOG.exemplar_label_key_position_index ON SCHEMA_CATALOG.exemplar_label_key_position
+(
+    metric_name, key
+);
+GRANT SELECT ON TABLE SCHEMA_CATALOG.exemplar_label_key_position_index TO prom_reader;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE SCHEMA_CATALOG.exemplar_label_key_position_index TO prom_writer;
 
 CREATE TABLE IF NOT EXISTS SCHEMA_CATALOG.exemplar (
     id          SERIAL,
@@ -15,4 +21,10 @@ CREATE TABLE IF NOT EXISTS SCHEMA_CATALOG.exemplar (
 );
 GRANT SELECT ON TABLE SCHEMA_CATALOG.exemplar TO prom_reader;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE SCHEMA_CATALOG.exemplar TO prom_writer;
--- todo: create indexes
+
+CREATE INDEX IF NOT EXISTS SCHEMA_CATALOG.exemplar_index ON SCHEMA_CATALOG.exemplar
+(
+    metric_name, table_name
+);
+GRANT SELECT ON TABLE SCHEMA_CATALOG.exemplar_index TO prom_reader;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE SCHEMA_CATALOG.exemplar_index TO prom_writer;
