@@ -204,12 +204,8 @@ func respondQuery(w http.ResponseWriter, res *promql.Result, warnings storage.Wa
 	}
 }
 
-func respondExemplar(w http.ResponseWriter, data interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(&response{
-		Status: "success",
-		Data:   data,
-	})
+func respondExemplar(w http.ResponseWriter, data []pgmodel.ExemplarQueryResult) {
+	_ = marshalExemplarResponse(w, data)
 }
 
 func respond(w http.ResponseWriter, status int, message interface{}) {
