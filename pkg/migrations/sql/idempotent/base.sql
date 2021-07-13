@@ -2175,6 +2175,72 @@ BEGIN
                 FROM timescaledb_information.chunks c
                 WHERE hypertable_schema='SCHEMA_DATA'
                 GROUP BY hypertable_schema, hypertable_name
+            ),
+            hcs AS (
+                SELECT
+                    ch.schema_name,
+                    ch.table_name,
+                    count(*)::bigint AS total_chunks,
+                    (count(*) FILTER (WHERE ch.compression_status = 'Compressed'))::bigint AS number_compressed_chunks,
+                    sum(ch.before_compression_total_bytes)::bigint AS before_compression_total_bytes,
+                    sum(ch.after_compression_total_bytes)::bigint AS after_compression_total_bytes
+                FROM
+                (
+                    -- local hypertables
+                    SELECT
+                        ch.hypertable_schema AS schema_name,
+                        ch.hypertable_name AS table_name,
+                        ch.compression_status,
+                        ch.uncompressed_total_size AS before_compression_total_bytes,
+                        ch.compressed_total_size AS after_compression_total_bytes,
+                        NULL::text AS node_name
+                    FROM
+                        _timescaledb_internal.compressed_chunk_stats ch
+                    WHERE ch.hypertable_schema = 'SCHEMA_DATA'
+                    UNION ALL
+                    -- distributed hypertables
+                    SELECT *
+                    FROM (
+                        WITH dht AS (
+                            -- list of distributed hypertables
+                            SELECT
+                                ht.schema_name,
+                                ht.table_name,
+                                s.node_name
+                            FROM _timescaledb_catalog.hypertable ht
+                            JOIN _timescaledb_catalog.hypertable_data_node s ON (
+                                ht.replication_factor > 0 AND s.hypertable_id = ht.id
+                            )
+                            WHERE ht.schema_name = 'SCHEMA_DATA'
+                        ), up AS (
+                            -- list of nodes we care about and whether they are up
+                            SELECT
+                                x.node_name,
+                                _timescaledb_internal.ping_data_node(x.node_name) AS node_up
+                            FROM (
+                                SELECT DISTINCT dht.node_name -- only ping each node once
+                                FROM dht
+                            ) x
+                        )
+                        SELECT
+                            dht.schema_name,
+                            dht.table_name,
+                            ch.compression_status,
+                            ch.before_compression_total_bytes,
+                            ch.after_compression_total_bytes,
+                            dht.node_name
+                        FROM dht
+                        JOIN up ON (dht.node_name = up.node_name)
+                        LEFT OUTER JOIN LATERAL _timescaledb_internal.data_node_compressed_chunk_stats (
+                            CASE WHEN up.node_up THEN
+                                up.node_name
+                            ELSE
+                                NULL
+                            END, dht.schema_name, dht.table_name) ch ON TRUE
+                        WHERE ch.chunk_name IS NOT NULL
+                    ) x
+                ) ch
+                GROUP BY ch.schema_name, ch.table_name
             )
             SELECT
                 m.id,
@@ -2202,13 +2268,7 @@ BEGIN
             LEFT JOIN LATERAL (SELECT SUM(h.total_bytes) as total_bytes
                FROM SCHEMA_TIMESCALE.hypertable_detailed_size(format('%I.%I', 'SCHEMA_DATA', m.table_name)::regclass) h
             ) hds ON true
-            LEFT JOIN LATERAL (SELECT
-                SUM(h.after_compression_total_bytes) as after_compression_total_bytes,
-                SUM(h.before_compression_total_bytes) as before_compression_total_bytes,
-                SUM(h.total_chunks) as total_chunks,
-                SUM(h.number_compressed_chunks) as number_compressed_chunks
-            FROM SCHEMA_TIMESCALE.hypertable_compression_stats(format('%I.%I', 'SCHEMA_DATA', m.table_name)::regclass) h
-            ) hcs ON true
+            LEFT JOIN hcs ON (m.table_name = hcs.table_name)
             LEFT JOIN ci ON (m.table_name = ci.table_name);
         ELSE
             RETURN QUERY
