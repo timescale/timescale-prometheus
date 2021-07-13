@@ -2166,6 +2166,16 @@ BEGIN
 
         IF SCHEMA_CATALOG.get_timescale_major_version() >= 2 THEN
             RETURN QUERY
+            WITH ci AS (
+                SELECT
+                    hypertable_schema AS schema_name,
+                    hypertable_name AS table_name,
+                    COALESCE(SUM(range_end-range_start) FILTER(WHERE is_compressed), INTERVAL '0') AS compressed_interval,
+                    COALESCE(SUM(range_end-range_start), INTERVAL '0') AS total_interval
+                FROM timescaledb_information.chunks c
+                WHERE hypertable_schema='SCHEMA_DATA'
+                GROUP BY hypertable_schema, hypertable_name
+            )
             SELECT
                 m.id,
                 m.metric_name,
@@ -2199,13 +2209,7 @@ BEGIN
                 SUM(h.number_compressed_chunks) as number_compressed_chunks
             FROM SCHEMA_TIMESCALE.hypertable_compression_stats(format('%I.%I', 'SCHEMA_DATA', m.table_name)::regclass) h
             ) hcs ON true
-            LEFT JOIN LATERAL (
-                SELECT
-                   COALESCE(SUM(range_end-range_start) FILTER(WHERE is_compressed), INTERVAL '0') AS compressed_interval,
-                   COALESCE(SUM(range_end-range_start), INTERVAL '0') AS total_interval
-                FROM timescaledb_information.chunks c
-                WHERE hypertable_schema='SCHEMA_DATA' AND hypertable_name=m.table_name
-            ) ci ON TRUE;
+            LEFT JOIN ci ON (m.table_name = ci.table_name);
         ELSE
             RETURN QUERY
                 SELECT
