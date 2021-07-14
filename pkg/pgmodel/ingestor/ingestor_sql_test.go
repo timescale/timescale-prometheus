@@ -776,10 +776,13 @@ func TestPGXInserterInsertData(t *testing.T) {
 			mock := model.NewSqlRecorder(c.sqlQueries, t)
 			scache := cache.NewSeriesCache(cache.DefaultConfig, nil)
 
-			metricCache := map[string]string{"metric_1": "metricTableName_1"}
 			mockMetrics := &model.MockMetricCache{
-				MetricCache:  metricCache,
+				MetricCache:  make(map[string]model.MockCacheEntry),
 				GetMetricErr: c.metricsGetErr,
+			}
+			err := mockMetrics.Set("prom_data", "metric_1", "prom_data", "metricTableName_1", "metric_1")
+			if err != nil {
+				t.Fatalf("error setting up mock cache: %s", err.Error())
 			}
 			inserter, err := newPgxDispatcher(mock, mockMetrics, scache, &Cfg{DisableEpochSync: true})
 			if err != nil {

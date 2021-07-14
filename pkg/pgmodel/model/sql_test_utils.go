@@ -82,6 +82,7 @@ func (r *SqlRecorder) Query(ctx context.Context, sql string, args ...interface{}
 func (r *SqlRecorder) QueryRow(ctx context.Context, sql string, args ...interface{}) pgx.Row {
 	r.lock.Lock()
 	defer r.lock.Unlock()
+	println(sql)
 	rows, err := r.checkQuery(sql, args...)
 	return &MockRows{results: rows, err: err}
 }
@@ -443,8 +444,14 @@ func (m *MockRows) RawValues() [][]byte {
 	panic("not implemented")
 }
 
+type MockCacheEntry struct {
+	schema      string
+	tableName   string
+	seriesTable string
+}
+
 type MockMetricCache struct {
-	MetricCache  map[string]string
+	MetricCache  map[string]MockCacheEntry
 	GetMetricErr error
 	SetMetricErr error
 }
@@ -461,21 +468,26 @@ func (m *MockMetricCache) Evictions() uint64 {
 	return 0
 }
 
-func (m *MockMetricCache) Get(metric string) (string, error) {
+func (m *MockMetricCache) Get(schema, metric string) (string, string, string, error) {
 	if m.GetMetricErr != nil {
-		return "", m.GetMetricErr
+		return "", "", "", m.GetMetricErr
 	}
 
-	val, ok := m.MetricCache[metric]
+	val, ok := m.MetricCache[schema+"*"+metric]
 	if !ok {
-		return "", errors.ErrEntryNotFound
+		return "", "", "", errors.ErrEntryNotFound
 	}
 
-	return val, nil
+	return val.schema, val.tableName, val.seriesTable, nil
 }
 
-func (m *MockMetricCache) Set(metric string, tableName string) error {
-	m.MetricCache[metric] = tableName
+func (m *MockMetricCache) Set(schema, metric, tableSchema, tableName, seriesTable string) error {
+	val := MockCacheEntry{
+		schema:      tableSchema,
+		tableName:   tableName,
+		seriesTable: seriesTable,
+	}
+	m.MetricCache[schema+"*"+metric] = val
 	return m.SetMetricErr
 }
 
